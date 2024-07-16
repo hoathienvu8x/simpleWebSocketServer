@@ -9,6 +9,7 @@
 #include <sys/epoll.h>
 #include <arpa/inet.h>
 #include <netinet/tcp.h>
+#include <fcntl.h>
 
 #ifndef NDEBUG
 #define PRERF "(errno=%d) %s\n"
@@ -16,6 +17,17 @@
 #endif
 #define EPOLL_MAP_TO_NOP (0u)
 #define EPOLL_MAP_SHIFT  (1u) /* Shift to cover reserved value MAP_TO_NOP */
+#ifndef MAX_BUFFER
+#define MAX_BUFFER (1024)
+#endif
+
+#ifndef SOMAXCONN
+#define SOMAXCONN 10
+#endif
+
+#ifndef PORT
+#define PORT (1024)
+#endif
 
 struct client_slot {
   bool      is_used;
@@ -24,7 +36,7 @@ struct client_slot {
   uint16_t  src_port;
   uint16_t  my_index;
   int state;
-  char buff[1024];
+  char buff[MAX_BUFFER];
 };
 
 struct tcp_state {
@@ -86,6 +98,13 @@ static const char *convert_addr_ntop(
   return ret;
 }
 
+static int set_nonblocking(int tcp_fd, int blocked) {
+  int flags = fcntl(tcp_fd, F_GETFL, 0);
+  if (blocked) {
+    return fcntl(tcp_fd, F_SETFL, flags | O_NONBLOCK);
+  }
+  return fcntl(tcp_fd, F_SETFL, flags & ~O_NONBLOCK);
+}
 
 static int accept_new_client(int tcp_fd, struct tcp_state *state) {
   int client_fd;
@@ -105,6 +124,14 @@ static int accept_new_client(int tcp_fd, struct tcp_state *state) {
     #ifndef NDEBUG
     /* Error */
     printf("accept(): " PRERF, PREAR(errno));
+    #endif
+    return -1;
+  }
+
+  if (set_nonblocking(client_fd, 1) != 0) {
+    #ifndef NDEBUG
+    /* Error */
+    printf("set_nonblocking(true): " PRERF, PREAR(errno));
     #endif
     return -1;
   }
@@ -220,7 +247,7 @@ static void handle_client_event(
 
 http_conn:
   resp = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\nHalo";
-  send(client_fd, resp, strlen(resp), 0);
+  (void)send(client_fd, resp, strlen(resp), 0);
 
 close_conn:
   #ifndef NDEBUG
@@ -325,7 +352,7 @@ static int init_socket(struct tcp_state *state) {
   struct sockaddr_in addr;
   socklen_t addr_len = sizeof(addr);
   const char *bind_addr = "0.0.0.0";
-  uint16_t bind_port = 1234;
+  uint16_t bind_port = PORT;
   #ifndef NDEBUG
   printf("Creating TCP socket...\n");
   #endif
@@ -335,6 +362,14 @@ static int init_socket(struct tcp_state *state) {
     printf("socket(): " PRERF, PREAR(errno));
     #endif
     return -1;
+  }
+
+  if (set_nonblocking(tcp_fd, 0) != 0) {
+    ret = -1;
+    #ifndef NDEBUG
+    printf("set_nonblocking(false): " PRERF, PREAR(errno));
+    #endif
+    goto out;
   }
 
   memset(&addr, 0, sizeof(addr));
@@ -360,7 +395,7 @@ static int init_socket(struct tcp_state *state) {
     goto out;
   }
 
-  ret = listen(tcp_fd, 10);
+  ret = listen(tcp_fd, SOMAXCONN);
   if (ret < 0) {
     ret = -1;
     #ifndef NDEBUG
