@@ -24,6 +24,7 @@ struct client_slot {
   uint16_t  src_port;
   uint16_t  my_index;
   int state;
+  char buff[1024];
 };
 
 struct tcp_state {
@@ -168,7 +169,6 @@ static void handle_client_event(
   int client_fd, uint32_t revents, struct tcp_state *state
 ) {
   ssize_t recv_ret;
-  char buffer[1024];
   const uint32_t err_mask = EPOLLERR | EPOLLHUP;
   const char * resp = NULL;
   /*
@@ -180,7 +180,7 @@ static void handle_client_event(
   if (revents & err_mask)
     goto close_conn;
 
-  recv_ret = recv(client_fd, buffer, sizeof(buffer), 0);
+  recv_ret = recv(client_fd, client->buff, sizeof(client->buff), 0);
   if (recv_ret == 0)
     goto close_conn;
 
@@ -196,8 +196,8 @@ static void handle_client_event(
 
   if (client->state == 0) {
     if (
-      strstr(buffer, "Sec-WebSocket-Version") == NULL &&
-      strstr(buffer, "Sec-WebSocket-Key") == NULL
+      strstr(client->buff, "Sec-WebSocket-Version") == NULL &&
+      strstr(client->buff, "Sec-WebSocket-Key") == NULL
     ) {
       goto http_conn;
     }
@@ -206,14 +206,14 @@ static void handle_client_event(
   /*
    * Safe printing
    */
-  buffer[recv_ret] = '\0';
-  if (buffer[recv_ret - 1] == '\n') {
-    buffer[recv_ret - 1] = '\0';
+  client->buff[recv_ret] = '\0';
+  if (client->buff[recv_ret - 1] == '\n') {
+    client->buff[recv_ret - 1] = '\0';
   }
   #ifndef NDEBUG
   printf(
     "Client %s:%u sends: \"%s\"\n",
-    client->src_ip, client->src_port, buffer
+    client->src_ip, client->src_port, client->buff
   );
   #endif
   return;
@@ -232,7 +232,7 @@ close_conn:
   my_epoll_delete(state->epoll_fd, client_fd);
   close(client_fd);
   client->is_used = false;
-  return;
+  memset(&client->buff, 0, sizeof(client->buff));
 }
 
 static int event_loop(struct tcp_state *state) {
@@ -400,6 +400,7 @@ static void init_state(struct tcp_state *state) {
     state->clients[i].is_used = false;
     state->clients[i].client_fd = -1;
     state->clients[i].state = 0;
+    memset(&state->clients[i].buff, 0, sizeof(state->clients[i].buff));
   }
 
   for (i = 0; i < client_map_num; i++) {
