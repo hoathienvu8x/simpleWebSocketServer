@@ -23,6 +23,7 @@ struct client_slot {
   char      src_ip[sizeof("xxx.xxx.xxx.xxx")];
   uint16_t  src_port;
   uint16_t  my_index;
+  int state;
 };
 
 struct tcp_state {
@@ -169,6 +170,7 @@ static void handle_client_event(
   ssize_t recv_ret;
   char buffer[1024];
   const uint32_t err_mask = EPOLLERR | EPOLLHUP;
+  const char * resp = NULL;
   /*
    * Read the mapped value to get client index.
    */
@@ -192,6 +194,15 @@ static void handle_client_event(
     goto close_conn;
   }
 
+  if (client->state == 0) {
+    if (
+      strstr(buffer, "Sec-WebSocket-Version") == NULL &&
+      strstr(buffer, "Sec-WebSocket-Key") == NULL
+    ) {
+      goto http_conn;
+    }
+  }
+
   /*
    * Safe printing
    */
@@ -206,6 +217,10 @@ static void handle_client_event(
   );
   #endif
   return;
+
+http_conn:
+  resp = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\nHalo";
+  send(client_fd, resp, strlen(resp), 0);
 
 close_conn:
   #ifndef NDEBUG
@@ -306,7 +321,7 @@ static int init_epoll(struct tcp_state *state) {
 }
 
 static int init_socket(struct tcp_state *state) {
-  int ret, tcp_fd = -1;
+  int ret, tcp_fd = -1, on = 1;
   struct sockaddr_in addr;
   socklen_t addr_len = sizeof(addr);
   const char *bind_addr = "0.0.0.0";
@@ -332,6 +347,15 @@ static int init_socket(struct tcp_state *state) {
     ret = -1;
     #ifndef NDEBUG
     printf("bind(): " PRERF, PREAR(errno));
+    #endif
+    goto out;
+  }
+
+  ret = setsockopt(tcp_fd, SOL_SOCKET, SO_REUSEADDR, (const char*) &on, sizeof(int));
+  if (ret < 0) {
+    ret = -1;
+    #ifndef NDEBUG
+    printf("setsockopt(SO_REUSEADDR): " PRERF, PREAR(errno));
     #endif
     goto out;
   }
@@ -375,6 +399,7 @@ static void init_state(struct tcp_state *state) {
   for (i = 0; i < client_slot_num; i++) {
     state->clients[i].is_used = false;
     state->clients[i].client_fd = -1;
+    state->clients[i].state = 0;
   }
 
   for (i = 0; i < client_map_num; i++) {
