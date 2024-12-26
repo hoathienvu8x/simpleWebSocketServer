@@ -1,4 +1,6 @@
 #include "ws.h"
+#include <unistd.h>
+static int handle_verify(ws_client * client);
 static int
 create_and_bind (char *port){ 
 
@@ -90,13 +92,13 @@ void* close_client(ws_client * client){
 	}
 }
 
-ws_frame* get_frame(ws_client* client){
+void get_frame(ws_client* client){
 
 	char buffer[BUFFER_SIZE];
 	int read_size = read(client->fd,buffer,BUFFER_SIZE);
 	if(read_size <= 0){
 		close_client(client);
-		return NULL;
+		return;
 	}
 	if(read_size > client->size - client->assgined){
 
@@ -138,19 +140,19 @@ ws_frame* get_frame(ws_client* client){
 			}
 		}
 		if(len == 126){
-			len = *((uint16_t*)client->data[2]);
+			len = *((uint16_t*)&client->data[2]);
 			idx +=2;
 		}else if (len == 127){
-			uint32_t highBits = *(uint32_t*)client->data[2];
+			uint32_t highBits = *(uint32_t*)&client->data[2];
 			if(highBits != 0){
 
 			}
-			len = *(uint32_t*)client->data[5];
+			len = *(uint32_t*)&client->data[5];
 			idx += 8;
 			
 		}
 		if(client->assgined < idx + 4 + len){
-			return NULL;
+			return;
 		}
 		char mask_bytes[4];
 		memcpy(mask_bytes,client->data+idx,4);
@@ -174,7 +176,7 @@ ws_frame* get_frame(ws_client* client){
 
 
 /*verify the http handshark and then hjack to websocket else close the client*/
-int handle_verify(ws_client * client){
+static int handle_verify(ws_client * client){
 
 	if(!client->state){
 		//get all http request data and then parse it
