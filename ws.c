@@ -1,8 +1,7 @@
 #include "ws.h"
 #include <unistd.h>
 static int handle_verify(ws_client * client);
-static int
-create_and_bind (char *port){ 
+static int create_and_bind (char *port){ 
 
   	struct addrinfo hints;
   	struct addrinfo *result, *rp;
@@ -70,6 +69,9 @@ void * create_client(int fd,ws_server * server){
 		//server->clients = realloc(server->client);
 		server->max_fd = fd;
 		server->clients = (ws_client * )realloc(server->clients,fd*sizeof(ws_client));
+    if (!server->clients) {
+      exit(EXIT_FAILURE);
+    }
 	}
 	ws_client * client = &server->clients[fd];
 	client->data = (char * ) malloc(sizeof(char)*BUFFER_SIZE + 1);
@@ -78,7 +80,7 @@ void * create_client(int fd,ws_server * server){
 	client->assgined =0;
 	client->state = 0;
 	client->fd = fd;
-	//return client;
+	return client;
 }
 
 void* close_client(ws_client * client){
@@ -166,6 +168,7 @@ void get_frame(ws_client* client){
 
 		//construct ws frame
 		ws_frame * frame = (ws_frame * )malloc(sizeof(ws_frame));
+    if (!frame) return;
 		frame->opcode = opcode;
 		frame->payload = payload;
 		handle_all_frame(client,frame);
@@ -197,10 +200,13 @@ static int handle_verify(ws_client * client){
 				char * key = strstr(sec,":")+2;
 				sprintf(secure_key,"%s%s",key,const_key);
 				key = get_socket_secure_key(secure_key);
+        if (!key) return -1;
 				char *  res_header_str= "HTTP/1.1 101 Web Socket Protocol Handshake\r\nUpgrade: WebSocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: %s%s";
 				char * double_newline = "\r\n\r\n";;
 				char msg[255] = {0};
-				sprintf(msg,res_header_str,key,double_newline); 
+				if (sprintf(msg,res_header_str,key,double_newline) <= 0) {
+          return -1;
+        }
 				if(write(client->fd,msg,strlen(msg)) <= 0){
 					close_client(client);
 				}
@@ -232,6 +238,7 @@ void send_frame(ws_client * client,int opcode,char * payload,int payload_size){
 	if( payload_size <126 ){
 		frame_size += 2;
 		frame_data =(char *) malloc(sizeof(char)*frame_size+1);
+    if (!frame_data) return;
 		frame_data[0] = op_code;
 		b2 |= payload_size;
 		frame_data[1] = b2;
@@ -240,6 +247,7 @@ void send_frame(ws_client * client,int opcode,char * payload,int payload_size){
 
 		frame_size += 4;
 		frame_data = (char  * )malloc(sizeof(char )*frame_size+1);
+    if (!frame_data) return;
 		frame_data[0] = op_code;
 		b2 |= payload_size;
 		frame_data[1] = b2;
@@ -253,6 +261,7 @@ void send_frame(ws_client * client,int opcode,char * payload,int payload_size){
 		frame_size += 10;
 		b2|= 127;
 		frame_data = (char  * )malloc(sizeof(char )*frame_size+1);
+    if (!frame_data) return;
 		frame_data[0] = op_code;
 		frame_data[1] = b2;
 		frame_data[2] = (0 >> 24) & 0xFF;
@@ -268,7 +277,9 @@ void send_frame(ws_client * client,int opcode,char * payload,int payload_size){
 	}
 	if(frame_data){	
 		frame_data[frame_size] = '\0';
-		write(client->fd,frame_data,frame_size);
+		if(write(client->fd,frame_data,frame_size) <= 0) {
+      perror("write() ");
+    }
 		free(frame_data);
 	}
 }
@@ -327,6 +338,7 @@ void handle_close(ws_client * client,int code,char * reason){
 	enum opcode close_opcode = CLOSE;
 	int payload_size = reason_size + 2;
 	char * payload =(char *) malloc(sizeof(char )* payload_size);
+  if(!payload) return;
 	payload[0] = (code >> 24) & 0xFF;
 	payload[1] = (code >> 16) & 0xFF;
 	memcpy(payload,reason,2);
@@ -407,10 +419,20 @@ ws_server *  create_server(){
 		printf("error listen");
 	}
 	server = (ws_server * )malloc(sizeof(ws_server));
+  if (!server) return NULL;
   	server->epollfd = epoll_create1(0);
 	server->events = calloc(MAX_EVENTS,sizeof(ev)); 
+  if (!server->events) {
+    free(server);
+    return NULL;
+  }
 	server->max_fd=MAX_EVENTS;
 	server->clients = (ws_client * ) malloc(sizeof(ws_client)*MAX_EVENTS);
+  if (!server->clients) {
+    free(server->events);
+    free(server);
+    return NULL;
+  }
        	if (epollfd == -1) {
           perror("epoll_create1");
            exit(EXIT_FAILURE);

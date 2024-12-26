@@ -23,6 +23,7 @@ char *b64_encode(const unsigned char *in, size_t len) {
 
   elen = b64_encoded_size(len);
   out  = malloc(elen+1);
+  if (!out) return NULL;
   out[elen] = '\0';
 
   for (i=0, j=0; i<len; i+=3, j+=4) {
@@ -298,7 +299,5 @@ char *get_socket_secure_key(const unsigned char *in)
     unsigned char temp[20];
     memset(temp, 0x0, 20);
     SHA1(in, strlen(in), temp);
-    char * digest = b64_encode(temp,20);
-    return digest;
- 
+    return b64_encode(temp,20); 
 }
