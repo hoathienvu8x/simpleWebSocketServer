@@ -271,8 +271,6 @@ void send_frame(ws_client * client,int opcode,char * payload,int payload_size){
 		write(client->fd,frame_data,frame_size);
 		free(frame_data);
 	}
-
-
 }
 void handle_all_frame(ws_client * client,ws_frame * frame){
 	if(frame == NULL){
@@ -339,7 +337,6 @@ void handle_close(ws_client * client,int code,char * reason){
 }
 
 char * unmask(char * mask_bytes,char * buffer,int buffer_size){
-
 	char * payload = (char * )malloc(sizeof(char )*buffer_size+1);
 	int mod = 0;
 	int i;

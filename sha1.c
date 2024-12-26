@@ -3,61 +3,54 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include "sha1.h"
+
 const char b64chars[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-size_t b64_encoded_size(size_t inlen)
-{
-    size_t ret;
- 
-    ret = inlen;
-    if (inlen % 3 != 0)
-        ret += 3 - (inlen % 3);
-    ret /= 3;
-    ret *= 4;
- 
-    return ret;
+
+size_t b64_encoded_size(size_t inlen) {
+  size_t ret = inlen;
+  if (inlen % 3 != 0)
+    ret += 3 - (inlen % 3);
+  ret /= 3;
+  ret *= 4;
+  return ret;
 }
-char *b64_encode(const unsigned char *in, size_t len)
-{
-    char   *out;
-    size_t  elen;
-    size_t  i;
-    size_t  j;
-    size_t  v;
- 
-    if (in == NULL || len == 0)
-        return NULL;
- 
-    elen = b64_encoded_size(len);
-    out  = malloc(elen+1);
-    out[elen] = '\0';
- 
-    for (i=0, j=0; i<len; i+=3, j+=4) {
-        v = in[i];
-        v = i+1 < len ? v << 8 | in[i+1] : v << 8;
-        v = i+2 < len ? v << 8 | in[i+2] : v << 8;
- 
-        out[j]   = b64chars[(v >> 18) & 0x3F];
-        out[j+1] = b64chars[(v >> 12) & 0x3F];
-        if (i+1 < len) {
-            out[j+2] = b64chars[(v >> 6) & 0x3F];
-        } else {
-            out[j+2] = '=';
-        }
-        if (i+2 < len) {
-            out[j+3] = b64chars[v & 0x3F];
-        } else {
-            out[j+3] = '=';
-        }
+char *b64_encode(const unsigned char *in, size_t len) {
+  char   *out;
+  size_t  elen, i, j, v;
+
+  if (in == NULL || len == 0)
+    return NULL;
+
+  elen = b64_encoded_size(len);
+  out  = malloc(elen+1);
+  out[elen] = '\0';
+
+  for (i=0, j=0; i<len; i+=3, j+=4) {
+    v = in[i];
+    v = i+1 < len ? v << 8 | in[i+1] : v << 8;
+    v = i+2 < len ? v << 8 | in[i+2] : v << 8;
+
+    out[j]   = b64chars[(v >> 18) & 0x3F];
+    out[j+1] = b64chars[(v >> 12) & 0x3F];
+    if (i+1 < len) {
+      out[j+2] = b64chars[(v >> 6) & 0x3F];
+    } else {
+      out[j+2] = '=';
     }
- 
-    return out;
+    if (i+2 < len) {
+      out[j+3] = b64chars[v & 0x3F];
+    } else {
+      out[j+3] = '=';
+    }
+  }
+
+  return out;
 }
-#define SHA1HANDSOFF
-typedef struct
-{
-    uint32_t state[5];
-    uint32_t count[2];
-    unsigned char buffer[64];
+
+typedef struct {
+  uint32_t state[5];
+  uint32_t count[2];
+  unsigned char buffer[64];
 } SHA1_CTX;
 
 #define rol(value, bits) (((value) << (bits)) | ((value) >> (32 - (bits))))
@@ -86,8 +79,8 @@ typedef struct
 /* Hash a single 512-bit block. This is the core of the algorithm. */
 
 void SHA1Transform(
-    uint32_t state[5],
-    const unsigned char buffer[64]
+  uint32_t state[5],
+  const unsigned char buffer[64]
 )
 {
     uint32_t a, b, c, d, e;
@@ -98,18 +91,10 @@ void SHA1Transform(
         uint32_t l[16];
     } CHAR64LONG16;
 
-#ifdef SHA1HANDSOFF
     CHAR64LONG16 block[1];      /* use array to appear as a pointer */
 
     memcpy(block, buffer, 64);
-#else
-    /* The following had better never be used because it causes the
-     * pointer-to-const buffer to be cast into a pointer to non-const.
-     * And the result is written through.  I threw a "const" in, hoping
-     * this will cause a diagnostic.
-     */
-    CHAR64LONG16 *block = (const CHAR64LONG16 *) buffer;
-#endif
+
     /* Copy context->state[] to working vars */
     a = state[0];
     b = state[1];
@@ -205,9 +190,8 @@ void SHA1Transform(
     state[4] += e;
     /* Wipe variables */
     a = b = c = d = e = 0;
-#ifdef SHA1HANDSOFF
+
     memset(block, '\0', sizeof(block));
-#endif
 }
 
 
@@ -311,11 +295,10 @@ void SHA1(
 
 char *get_socket_secure_key(const unsigned char *in)
 {
-    #define SHA_DIGEST_LENGTH 20
-    unsigned char temp[SHA_DIGEST_LENGTH];
-    memset(temp, 0x0, SHA_DIGEST_LENGTH);
+    unsigned char temp[20];
+    memset(temp, 0x0, 20);
     SHA1(in, strlen(in), temp);
-    char * digest = b64_encode(temp,SHA_DIGEST_LENGTH);
+    char * digest = b64_encode(temp,20);
     return digest;
  
 }
