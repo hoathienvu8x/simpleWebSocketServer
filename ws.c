@@ -1,5 +1,6 @@
 #include "ws.h"
 #include <unistd.h>
+
 static int handle_verify (ws_client * client);
 static int create_and_bind (char *port)
 {
@@ -178,9 +179,7 @@ void get_frame (ws_client * client)
     frame->opcode = opcode;
     frame->payload = payload;
     handle_all_frame (client, frame);
-
   }
-
 }
 
 
@@ -210,7 +209,8 @@ static int handle_verify (ws_client * client)
         if (!key)
           return -1;
         char *res_header_str =
-          "HTTP/1.1 101 Web Socket Protocol Handshake\r\nUpgrade: WebSocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: %s%s";
+          "HTTP/1.1 101 Web Socket Protocol Handshake\r\nUpgrade: "
+          "WebSocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: %s%s";
         char *double_newline = "\r\n\r\n";;
         char msg[255] = { 0 };
         if (sprintf (msg, res_header_str, key, double_newline) <= 0) {
@@ -235,13 +235,11 @@ static int handle_verify (ws_client * client)
   }
 
   return 0;
-
 }
 
-void send_frame (ws_client * client, int opcode, char *payload,
-                 int payload_size)
-{
-
+void send_frame (
+  ws_client * client, int opcode, char *payload, int payload_size
+) {
   int frame_size = payload_size;
   char op_code = 0x80 | opcode;
   char b2 = 0;
@@ -251,16 +249,17 @@ void send_frame (ws_client * client, int opcode, char *payload,
     frame_data = (char *) malloc (sizeof (char) * frame_size + 1);
     if (!frame_data)
       return;
+
     frame_data[0] = op_code;
     b2 |= payload_size;
     frame_data[1] = b2;
     memcpy (frame_data + 2, payload, payload_size);
   } else if (payload_size == 126) {
-
     frame_size += 4;
     frame_data = (char *) malloc (sizeof (char) * frame_size + 1);
     if (!frame_data)
       return;
+
     frame_data[0] = op_code;
     b2 |= payload_size;
     frame_data[1] = b2;
@@ -268,14 +267,13 @@ void send_frame (ws_client * client, int opcode, char *payload,
     frame_data[2] = payload_size_extra[0];
     frame_data[3] = payload_size_extra[1];
     memcpy (frame_data + 4, payload, payload_size);
-
   } else {
-
     frame_size += 10;
     b2 |= 127;
     frame_data = (char *) malloc (sizeof (char) * frame_size + 1);
     if (!frame_data)
       return;
+
     frame_data[0] = op_code;
     frame_data[1] = b2;
     frame_data[2] = (0 >> 24) & 0xFF;
@@ -333,7 +331,6 @@ void handle_all_frame (ws_client * client, ws_frame * frame)
     free (frame->payload);
     free (frame);
   }
-
 }
 
 void handle_text (ws_client * client, char *payload, int payload_size)
@@ -386,7 +383,6 @@ char *unmask (char *mask_bytes, char *buffer, int buffer_size)
 
 void event_loop (ws_server * server)
 {
-
   /* Code to set up listening socket, 'listen_sock',
      (socket(), bind(), listen()) omitted */
   int conn_sock, nfds;
@@ -421,7 +417,6 @@ void event_loop (ws_server * server)
         create_client (ev.data.fd, server);
 
       } else {
-
         client_index = server->events[n].data.fd;
         get_frame (&server->clients[client_index]);
       }
@@ -432,8 +427,6 @@ void event_loop (ws_server * server)
 
 ws_server *create_server ()
 {
-
-
   int s;
   struct epoll_event ev;
   listen_sock = create_and_bind ("8088");
