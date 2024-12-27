@@ -1,5 +1,8 @@
-#include "stdio.h"
-#include "stdlib.h"
+#ifndef _WS_H
+#define _WS_H
+
+#include <stdio.h>
+#include <stdlib.h>
 #include <sys/epoll.h>
 #include <sys/socket.h>
 #include <netdb.h>
@@ -52,7 +55,6 @@ typedef struct server {
   int event_size;               //
   int current_event_size;
   int max_fd;                   //current max fd
-
 } ws_server;
 ws_server *server = NULL;
 char *unmask (char *mask_bytes, char *buffer, int buffer_size);
@@ -62,3 +64,5 @@ void handle_data (ws_client * client, char *data, int data_size);
 void handle_close (ws_client * client, int code, char *reason);
 void handle_text (ws_client * client, char *payload, int payload_size);
 void broadcast (char *msg);
+
+#endif
