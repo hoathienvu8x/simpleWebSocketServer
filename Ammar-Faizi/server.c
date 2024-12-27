@@ -22,6 +22,13 @@
 
 #define array_size(a) (sizeof(a) / sizeof(*(a)))
 
+#define MAX_CLIENT_SLOTS (10)
+#define MAX_CLIENT_MAPS  (10000)
+#define MAX_BUFFER_LEN   (1024)
+#define MAX_CLIENT_EVENTS (32)
+#define EVENT_TIMEOUT_MS  (3000)
+#define MAX_EVENT_LISTEN  (10)
+
 struct client_slot {
   bool                is_used;
   int                 client_fd;
@@ -35,7 +42,7 @@ struct tcp_state {
   int                 tcp_fd;
   int                 epoll_fd;
   uint16_t            client_c;
-  struct client_slot  clients[10];
+  struct client_slot  clients[MAX_CLIENT_SLOTS];
 
   /*
    * Map the file descriptor to client_slot array index
@@ -43,7 +50,7 @@ struct tcp_state {
    *
    * You must adjust this in production.
    */
-  uint32_t            client_map[10000];
+  uint32_t            client_map[MAX_CLIENT_MAPS];
 };
 
 static int my_epoll_add(int epoll_fd, int fd, uint32_t events)
@@ -136,6 +143,12 @@ static int accept_new_client(int tcp_fd, struct tcp_state *state)
 
     if (!client->is_used) {
       /*
+       * Let's tell to `epoll` to monitor this client file descriptor.
+       */
+      if (my_epoll_add(state->epoll_fd, client_fd, EPOLLIN | EPOLLPRI) < 0) {
+        goto out_close;
+      }
+      /*
        * We found unused slot.
        */
 
@@ -151,10 +164,6 @@ static int accept_new_client(int tcp_fd, struct tcp_state *state)
        */
       state->client_map[client_fd] = client->my_index + EPOLL_MAP_SHIFT;
 
-      /*
-       * Let's tell to `epoll` to monitor this client file descriptor.
-       */
-      my_epoll_add(state->epoll_fd, client_fd, EPOLLIN | EPOLLPRI);
       #ifndef NDEBUG
       printf("Client %s:%u has been accepted!\n", src_ip, src_port);
       #endif
@@ -174,7 +183,7 @@ static void handle_client_event(int client_fd, uint32_t revents,
                     struct tcp_state *state)
 {
   ssize_t recv_ret;
-  char buffer[1024];
+  char buffer[MAX_BUFFER_LEN];
   const uint32_t err_mask = EPOLLERR | EPOLLHUP;
   /*
    * Read the mapped value to get client index.
@@ -226,11 +235,9 @@ close_conn:
 static int event_loop(struct tcp_state *state)
 {
   int ret = 0;
-  int timeout = 3000; /* in milliseconds */
-  int maxevents = 32;
   int epoll_ret;
   int epoll_fd = state->epoll_fd;
-  struct epoll_event events[32];
+  struct epoll_event events[MAX_CLIENT_EVENTS];
 
   #ifndef NDEBUG
   printf("Entering event loop...\n");
@@ -242,14 +249,14 @@ static int event_loop(struct tcp_state *state)
      * when event comes to my monitored file descriptors, or
      * when the timeout reached.
      */
-    epoll_ret = epoll_wait(epoll_fd, events, maxevents, timeout);
+    epoll_ret = epoll_wait(epoll_fd, events, MAX_CLIENT_EVENTS, EVENT_TIMEOUT_MS);
 
     if (epoll_ret == 0) {
       /*
        *`epoll_wait` reached its timeout
        */
       #ifndef NDEBUG
-      printf("I don't see any event within %d milliseconds\n", timeout);
+      printf("I don't see any event within %d milliseconds\n", EVENT_TIMEOUT_MS);
       #endif
       continue;
     }
@@ -368,7 +375,7 @@ static int init_socket(struct tcp_state *state)
 
   freeaddrinfo(result);
 
-  ret = listen(tcp_fd, 10);
+  ret = listen(tcp_fd, MAX_EVENT_LISTEN);
   if (ret < 0) {
     ret = -1;
     #ifndef NDEBUG
