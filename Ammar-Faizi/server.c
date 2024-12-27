@@ -7,6 +7,7 @@
 #include <unistd.h>
 #include <string.h>
 #include <stdbool.h>
+#include <netdb.h>
 #include <sys/epoll.h>
 #include <arpa/inet.h>
 #include <netinet/tcp.h>
@@ -303,7 +304,7 @@ static int init_epoll(struct tcp_state *state)
   #endif
 
   /* The epoll_create argument is ignored on modern Linux */
-  epoll_fd = epoll_create(255);
+  epoll_fd = epoll_create1(0);
   if (epoll_fd < 0) {
     #ifndef NDEBUG
     printf("epoll_create(): " PRERF, PREAR(errno));
@@ -319,35 +320,53 @@ static int init_socket(struct tcp_state *state)
 {
   int ret;
   int tcp_fd = -1;
-  struct sockaddr_in addr;
-  socklen_t addr_len = sizeof(addr);
+  struct addrinfo hints, *result, *rp;
+  char port[10] = {0};
+  
   const char *bind_addr = "0.0.0.0";
   uint16_t bind_port = 1234;
+
+  memset(&hints, 0, sizeof(struct addrinfo));
+
+  hints.ai_family = AF_UNSPEC;
+  hints.ai_socktype = SOCK_STREAM;
+  hints.ai_flags = AI_PASSIVE;
 
   #ifndef NDEBUG
   printf("Creating TCP socket...\n");
   #endif
-  tcp_fd = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, IPPROTO_TCP);
-  if (tcp_fd < 0) {
+
+  if (snprintf(port, sizeof(port) - 1, "%d", bind_port) <= 0) {
     #ifndef NDEBUG
     printf("socket(): " PRERF, PREAR(errno));
     #endif
     return -1;
   }
 
-  memset(&addr, 0, sizeof(addr));
-  addr.sin_family = AF_INET;
-  addr.sin_port = htons(bind_port);
-  addr.sin_addr.s_addr = inet_addr(bind_addr);
+  if (getaddrinfo(bind_addr, port, &hints, &result) != 0) {
+    #ifndef NDEBUG
+    printf("socket(): " PRERF, PREAR(errno));
+    #endif
+    return -1;
+  }
 
-  ret = bind(tcp_fd, (struct sockaddr *)&addr, addr_len);
-  if (ret < 0) {
-    ret = -1;
+  for (rp = result; rp != NULL; rp = rp->ai_next) {
+    tcp_fd = socket(rp->ai_family, rp->ai_socktype | SOCK_NONBLOCK, rp->ai_protocol);
+    if (tcp_fd == -1) continue;
+    if (bind(tcp_fd, rp->ai_addr, rp->ai_addrlen) == 0) {
+      break;
+    }
+  }
+
+  if (rp == NULL) {
     #ifndef NDEBUG
     printf("bind(): " PRERF, PREAR(errno));
     #endif
+    freeaddrinfo(result);
     goto out;
   }
+
+  freeaddrinfo(result);
 
   ret = listen(tcp_fd, 10);
   if (ret < 0) {
