@@ -84,13 +84,14 @@ void *create_client (int fd, ws_server * server)
   client->assgined = 0;
   client->state = 0;
   client->fd = fd;
+  client->server = server;
   return client;
 }
 
 void *close_client (ws_client * client)
 {
   if (client != NULL) {
-
+    ws_server *server = client->server;
     close (client->fd);
     free (client->data);
     if (client->fd < server->max_fd) {
@@ -306,7 +307,7 @@ void handle_all_frame (ws_client * client, ws_frame * frame)
   switch (frame->opcode) {
   case TEXT:
     //handle_text(client,frame->payload,strlen(frame->payload));
-    broadcast (frame->payload);
+    broadcast (client->server, frame->payload);
     break;
   case BINARY:
     break;
@@ -385,7 +386,9 @@ void event_loop (ws_server * server)
 {
   /* Code to set up listening socket, 'listen_sock',
      (socket(), bind(), listen()) omitted */
-  int conn_sock, nfds;
+  int conn_sock, nfds, addrlen;
+  struct sockaddr_in servaddr;
+  addrlen = sizeof(servaddr);
   for (;;) {
     nfds = epoll_wait (server->epollfd, server->events, MAX_EVENTS, -1);
     if (nfds == -1) {
@@ -394,8 +397,8 @@ void event_loop (ws_server * server)
     }
     int n, client_index;
     for (n = 0; n < nfds; ++n) {
-      if (server->events[n].data.fd == listen_sock) {
-        conn_sock = accept (listen_sock,
+      if (server->events[n].data.fd == server->listen_sock) {
+        conn_sock = accept (server->listen_sock,
                             (struct sockaddr *) &servaddr, &addrlen);
         if (conn_sock == -1) {
           perror ("accept");
@@ -429,17 +432,18 @@ ws_server *create_server ()
 {
   int s;
   struct epoll_event ev;
-  listen_sock = create_and_bind ("8088");
+  int listen_sock = create_and_bind ("8088");
   setNonblocking (listen_sock);
   s = listen (listen_sock, MAX_EVENTS);
   if (s < 0) {
     printf ("error listen");
   }
-  server = (ws_server *) malloc (sizeof (ws_server));
+  ws_server *server = (ws_server *) malloc (sizeof (ws_server));
   if (!server)
     return NULL;
   server->epollfd = epoll_create1 (0);
   server->events = calloc (MAX_EVENTS, sizeof (ev));
+  server->listen_sock = listen_sock;
   if (!server->events) {
     free (server);
     return NULL;
@@ -451,7 +455,7 @@ ws_server *create_server ()
     free (server);
     return NULL;
   }
-  if (epollfd == -1) {
+  if (server->epollfd == -1) {
     perror ("epoll_create1");
     exit (EXIT_FAILURE);
   }
@@ -464,7 +468,7 @@ ws_server *create_server ()
   return server;
 }
 
-void broadcast (char *msg)
+void broadcast (ws_server *server, char *msg)
 {
 
   int msg_len = strlen (msg);
@@ -480,7 +484,7 @@ void broadcast (char *msg)
 int main (int argc, char **argv)
 {
 
-  server = create_server ();
+  ws_server *server = create_server ();
   event_loop (server);
 
 

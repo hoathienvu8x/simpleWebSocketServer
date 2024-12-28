@@ -8,6 +8,7 @@
 #include <string.h>
 #include <stdbool.h>
 #include <netdb.h>
+#include <fcntl.h>
 #include <sys/epoll.h>
 #include <arpa/inet.h>
 #include <netinet/tcp.h>
@@ -29,12 +30,20 @@
 #define EVENT_TIMEOUT_MS  (3000)
 #define MAX_EVENT_LISTEN  (10)
 
+struct ringbuf_t {
+  char data[MAX_BUFFER_LEN];
+  size_t pos;
+  size_t len;
+};
+
 struct client_slot {
   bool                is_used;
   int                 client_fd;
   char                src_ip[ipv4_size];
   uint16_t            src_port;
   uint16_t            my_index;
+  int                 state;
+  struct ringbuf_t    buf;
 };
 
 struct tcp_state {
@@ -98,6 +107,23 @@ static const char *convert_addr_ntop(struct sockaddr_in *addr, char *src_ip_buf)
   return ret;
 }
 
+static int set_nonblocking(int fd) {
+  int flags = fcntl (fd, F_GETFL, 0);
+  if (flags == -1) {
+    #ifndef NDEBUG
+    printf("fcntl(F_GETFL): " PRERF, PREAR(errno ? errno : EINVAL));
+    #endif
+    return -1;
+  }
+  if (fcntl (fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+    #ifndef NDEBUG
+    printf("fcntl(F_SETFL): " PRERF, PREAR(errno ? errno : EINVAL));
+    #endif
+    return -1;
+  }
+  return 0;
+}
+
 static int accept_new_client(int tcp_fd, struct tcp_state *state)
 {
   int client_fd;
@@ -148,6 +174,10 @@ static int accept_new_client(int tcp_fd, struct tcp_state *state)
       if (my_epoll_add(state->epoll_fd, client_fd, EPOLLIN | EPOLLPRI) < 0) {
         goto out_close;
       }
+      
+      if (set_nonblocking(client_fd) < 0) {
+        goto out_close;
+      }
       /*
        * We found unused slot.
        */
@@ -157,6 +187,8 @@ static int accept_new_client(int tcp_fd, struct tcp_state *state)
       client->src_port = src_port;
       client->is_used = true;
       client->my_index = i;
+      client->state = 0;
+      memset(&client->buf, 0, sizeof(struct ringbuf_t));
 
       /*
        * We map the client_fd to client array index that we accept
@@ -199,7 +231,7 @@ static void handle_client_event(int client_fd, uint32_t revents,
     goto close_conn;
 
   if (recv_ret < 0) {
-    if (errno == EAGAIN)
+    if (errno == EAGAIN || errno == EWOULDBLOCK)
       return;
 
     /* Error */
@@ -414,6 +446,8 @@ static void init_state(struct tcp_state *state)
   for (size_t i = 0; i < client_slot_num; i++) {
     state->clients[i].is_used = false;
     state->clients[i].client_fd = -1;
+    state->clients[i].state = 0;
+    memset(&state->clients[i].buf, 0, sizeof(struct ringbuf_t));
   }
 
   for (uint16_t i = 0; i < client_map_num; i++) {
