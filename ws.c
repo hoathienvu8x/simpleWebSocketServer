@@ -2,7 +2,7 @@
 #include <unistd.h>
 
 static int handle_verify (ws_client * client);
-static int create_and_bind (char *port)
+static int create_and_bind (const char *port)
 {
 
   struct addrinfo hints;
@@ -64,10 +64,34 @@ int setNonblocking (int sfd)
   return 0;
 }
 
+static int my_epoll_add(int epoll_fd, int fd, uint32_t events)
+{
+  struct epoll_event event;
+
+  /* Shut the valgrind up! */
+  memset(&event, 0, sizeof(struct epoll_event));
+
+  event.events  = events;
+  event.data.fd = fd;
+  if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, fd, &event) < 0) {
+    perror("my_epoll_add(): ");
+    return -1;
+  }
+  return 0;
+}
+
+static int my_epoll_delete(int epoll_fd, int fd)
+{
+  if (epoll_ctl(epoll_fd, EPOLL_CTL_DEL, fd, NULL) < 0) {
+    perror("my_epoll_delete(): ");
+    return -1;
+  }
+  return 0;
+}
 
 void *create_client (int fd, ws_server * server)
 {
-
+  if (!server) return NULL;
   if (server->max_fd < fd) {
     //server->clients = realloc(server->client);
     server->max_fd = fd;
@@ -84,13 +108,15 @@ void *create_client (int fd, ws_server * server)
   client->assgined = 0;
   client->state = 0;
   client->fd = fd;
+  client->server = server;
   return client;
 }
 
-void *close_client (ws_client * client)
+void close_client (ws_client * client)
 {
   if (client != NULL) {
-
+    ws_server *server = client->server;
+    my_epoll_delete(server->epollfd, client->fd);
     close (client->fd);
     free (client->data);
     if (client->fd < server->max_fd) {
@@ -101,7 +127,7 @@ void *close_client (ws_client * client)
 
 void get_frame (ws_client * client)
 {
-
+  if (!client) return;
   char buffer[BUFFER_SIZE];
   int read_size = read (client->fd, buffer, BUFFER_SIZE);
   if (read_size <= 0) {
@@ -162,11 +188,15 @@ void get_frame (ws_client * client)
     if (client->assgined < idx + 4 + len) {
       return;
     }
-    char mask_bytes[4];
-    memcpy (mask_bytes, client->data + idx, 4);
-    idx += 4;
-    char *payload = client->data + idx;
-    payload = unmask (mask_bytes, payload, len);        //get payload to handle_all_frame and end  have to destory the memory area
+    char *payload = NULL;
+    if (mask) {
+      char mask_bytes[4];
+      memcpy (mask_bytes, client->data + idx, 4);
+      idx += 4;
+      payload = unmask (mask_bytes, client->data + idx, len);        //get payload to handle_all_frame and end  have to destory the memory area
+    } else {
+      payload = client->data + idx;
+    }
     memset (client->data, '0', idx + len);      //
     char *remain = client->data + idx + len;
     client->assgined = client->assgined - idx - len;
@@ -186,7 +216,7 @@ void get_frame (ws_client * client)
 /*verify the http handshark and then hjack to websocket else close the client*/
 static int handle_verify (ws_client * client)
 {
-
+  if (!client) return -1;
   if (!client->state) {
     //get all http request data and then parse it
     //split the request and then get the  header "sec-websocket-key" and the get the value
@@ -205,7 +235,7 @@ static int handle_verify (ws_client * client)
         char secure_key[255] = { 0 };
         char *key = strstr (sec, ":") + 2;
         sprintf (secure_key, "%s%s", key, const_key);
-        key = get_socket_secure_key (secure_key);
+        key = get_socket_secure_key ((const unsigned char *)secure_key);
         if (!key)
           return -1;
         char *res_header_str =
@@ -240,6 +270,7 @@ static int handle_verify (ws_client * client)
 void send_frame (
   ws_client * client, int opcode, char *payload, int payload_size
 ) {
+  if (!client) return;
   int frame_size = payload_size;
   char op_code = 0x80 | opcode;
   char b2 = 0;
@@ -298,15 +329,15 @@ void send_frame (
 
 void handle_all_frame (ws_client * client, ws_frame * frame)
 {
-  if (frame == NULL) {
+  if (frame == NULL || client == NULL) {
     return;
   }
   //handle the ws_frame
   enum opcode enum_opcode = (enum opcode) frame->opcode;
-  switch (frame->opcode) {
+  switch (enum_opcode) {
   case TEXT:
     //handle_text(client,frame->payload,strlen(frame->payload));
-    broadcast (frame->payload);
+    broadcast (client->server, frame->payload);
     break;
   case BINARY:
     break;
@@ -335,6 +366,7 @@ void handle_all_frame (ws_client * client, ws_frame * frame)
 
 void handle_text (ws_client * client, char *payload, int payload_size)
 {
+  if (!client) return;
 //handler the raw data
   enum opcode enum_opcode = TEXT;
   send_frame (client, enum_opcode, payload, payload_size);
@@ -342,6 +374,7 @@ void handle_text (ws_client * client, char *payload, int payload_size)
 
 void handle_ping (ws_client * client)
 {
+  if (!client) return;
 //handler ping data send pong
   char *payload = "pong pong";
   enum opcode enum_opcode = PONG;
@@ -351,6 +384,7 @@ void handle_ping (ws_client * client)
 
 void handle_close (ws_client * client, int code, char *reason)
 {
+  if (!client) return;
   //handle the close
   int reason_size = strlen (reason);
   enum opcode close_opcode = CLOSE;
@@ -386,6 +420,8 @@ void event_loop (ws_server * server)
   /* Code to set up listening socket, 'listen_sock',
      (socket(), bind(), listen()) omitted */
   int conn_sock, nfds;
+  struct sockaddr_in servaddr;
+  socklen_t addrlen = sizeof(servaddr);
   for (;;) {
     nfds = epoll_wait (server->epollfd, server->events, MAX_EVENTS, -1);
     if (nfds == -1) {
@@ -394,8 +430,8 @@ void event_loop (ws_server * server)
     }
     int n, client_index;
     for (n = 0; n < nfds; ++n) {
-      if (server->events[n].data.fd == listen_sock) {
-        conn_sock = accept (listen_sock,
+      if (server->events[n].data.fd == server->listen_sock) {
+        conn_sock = accept (server->listen_sock,
                             (struct sockaddr *) &servaddr, &addrlen);
         if (conn_sock == -1) {
           perror ("accept");
@@ -403,18 +439,21 @@ void event_loop (ws_server * server)
         }
         //int  flags = fcntl(fd, F_GETFL, 0);
         //fcntl(conn_sock, F_SETFL, flags | O_NONBLOCK);
-        setNonblocking (conn_sock);
-        struct epoll_event ev = { 0 };
-        ev.events = EPOLLIN | EPOLLET;
-        ev.data.fd = conn_sock;
+        if (setNonblocking (conn_sock) < 0) {
+          close(conn_sock);
+          continue;
+        }
 
         //if(server->current_event_size == )
-        if (epoll_ctl (server->epollfd, EPOLL_CTL_ADD, conn_sock, &ev) == -1) {
-          perror ("epoll_ctl: conn_sock");
-          //exit(EXIT_FAILURE);    
+        if (my_epoll_add (server->epollfd, conn_sock, EPOLLIN | EPOLLET) == -1) {
+          close(conn_sock);
+          continue;
         }
         server->current_event_size += 1;
-        create_client (ev.data.fd, server);
+        if (NULL == create_client (conn_sock, server)) {
+          my_epoll_delete(server->epollfd, conn_sock);
+          close(conn_sock);
+        }
 
       } else {
         client_index = server->events[n].data.fd;
@@ -425,48 +464,59 @@ void event_loop (ws_server * server)
 
 }
 
-ws_server *create_server ()
+ws_server *create_server (const char *port)
 {
   int s;
   struct epoll_event ev;
-  listen_sock = create_and_bind ("8088");
-  setNonblocking (listen_sock);
+  int listen_sock = create_and_bind (port);
+  if (setNonblocking (listen_sock) < 0) {
+    close(listen_sock);
+    return NULL;
+  }
   s = listen (listen_sock, MAX_EVENTS);
   if (s < 0) {
     printf ("error listen");
+    return NULL;
   }
-  server = (ws_server *) malloc (sizeof (ws_server));
+  ws_server *server = (ws_server *) malloc (sizeof (ws_server));
   if (!server)
     return NULL;
+
   server->epollfd = epoll_create1 (0);
   server->events = calloc (MAX_EVENTS, sizeof (ev));
+  server->listen_sock = listen_sock;
+
   if (!server->events) {
-    free (server);
-    return NULL;
+    goto clean_up;
   }
   server->max_fd = MAX_EVENTS;
   server->clients = (ws_client *) malloc (sizeof (ws_client) * MAX_EVENTS);
   if (!server->clients) {
-    free (server->events);
-    free (server);
-    return NULL;
+    goto clean_up;
   }
-  if (epollfd == -1) {
+  if (server->epollfd == -1) {
     perror ("epoll_create1");
-    exit (EXIT_FAILURE);
+    goto clean_up;
   }
   ev.events = EPOLLIN;
   ev.data.fd = listen_sock;
   if (epoll_ctl (server->epollfd, EPOLL_CTL_ADD, listen_sock, &ev) == -1) {
     perror ("epoll_ctl: listen_sock");
-    exit (EXIT_FAILURE);
+    goto clean_up;
   }
   return server;
+
+clean_up:
+  if (server->epollfd != -1) close(server->epollfd);
+  if (server->events) free (server->events);
+  if (server->clients) free (server->clients);
+  free(server);
+  return NULL;
 }
 
-void broadcast (char *msg)
+void broadcast (ws_server *server, char *msg)
 {
-
+  if (!server || !msg || strlen(msg) == 0) return;
   int msg_len = strlen (msg);
   int client_idx;
   for (client_idx = 0; client_idx < server->max_fd; client_idx++) {
@@ -475,14 +525,4 @@ void broadcast (char *msg)
       handle_text (client, msg, msg_len);
     }
   }
-}
-
-int main (int argc, char **argv)
-{
-
-  server = create_server ();
-  event_loop (server);
-
-
-  return 1;
 }

@@ -281,6 +281,6 @@ char *get_socket_secure_key (const unsigned char *in)
 {
   unsigned char temp[20];
   memset (temp, 0x0, 20);
-  SHA1 (in, strlen (in), temp);
+  SHA1 (in, strlen ((char *)in), temp);
   return b64_encode (temp, 20);
 }

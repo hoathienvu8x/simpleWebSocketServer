@@ -21,9 +21,9 @@
 // read data and  parse it specify protocol
 
 //struct epoll_event ev, events[MAX_EVENTS];
-struct sockaddr_in servaddr;
+// struct sockaddr_in servaddr;
 //typedef struct server ws_server;
-int listen_sock, epollfd, addrlen;
+// int listen_sock, epollfd, addrlen;
 
 typedef struct frame {
   int opcode;
@@ -37,32 +37,38 @@ enum opcode {
   PING = 9,
   PONG = 10,
 };
-typedef struct client {
+typedef struct client ws_client;
+typedef struct server ws_server;
+
+struct client {
   int fd;
   char *data;
   int size;
   int assgined;
   int state;
+  ws_server *server;
+};
 
-} ws_client;
 
-
-typedef struct server {
+struct server {
   ws_client *clients;           //all of the connection client
   int client_size;              // client scale
   int epollfd;                  //epoll listenfd
+  int listen_sock;
   struct epoll_event *events;   //monitor event list
   int event_size;               //
   int current_event_size;
   int max_fd;                   //current max fd
-} ws_server;
-ws_server *server = NULL;
+};
+
 char *unmask (char *mask_bytes, char *buffer, int buffer_size);
 void handle_all_frame (ws_client * client, ws_frame * frame);
 void handle_ping (ws_client * client);
 void handle_data (ws_client * client, char *data, int data_size);
 void handle_close (ws_client * client, int code, char *reason);
 void handle_text (ws_client * client, char *payload, int payload_size);
-void broadcast (char *msg);
+void broadcast (ws_server *server, char *msg);
+ws_server *create_server (const char *port);
+void event_loop (ws_server * server);
 
 #endif
