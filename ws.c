@@ -142,7 +142,7 @@ void get_frame (ws_client * client)
   char buffer[BUFFER_SIZE];
   int read_size = read (client->fd, buffer, BUFFER_SIZE);
   if (read_size <= 0) {
-    if (read_size < 0 && errno == EWOULDBLOCK) {
+    if (read_size < 0 && (errno == EWOULDBLOCK || errno == EAGAIN)) {
       return;
     }
     close_client (client);
@@ -260,9 +260,20 @@ static int handle_verify (ws_client * client)
         if (sprintf (msg, res_header_str, key, double_newline) <= 0) {
           return -1;
         }
-        if (write (client->fd, msg, strlen (msg)) <= 0) {
-          close_client (client);
-        }
+        char *buf2 = msg;
+        size_t slen = strlen(msg);
+        int retval = 0;
+        do {
+          if ((retval = write (client->fd, buf2, slen)) <= 0) {
+            if (retval < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) continue;
+            if (retval == 0) {
+              close_client (client);
+              break;
+            }
+            buf2 += retval;
+            slen -= (size_t)retval;
+          }
+        } while ((errno == EAGAIN || errno == EWOULDBLOCK) && slen > 0);
 
         int http_header_len = http_header - client->data + 4;
 
@@ -286,9 +297,11 @@ void send_frame (
 ) {
   if (!client) return;
   int frame_size = payload_size;
+  int retval = 0;
   char op_code = 0x80 | opcode;
   char b2 = 0;
   char *frame_data = NULL;
+  char *buf2 = NULL;
   if (payload_size < 126) {
     frame_size += 2;
     frame_data = (char *) malloc (sizeof (char) * frame_size + 1);
@@ -334,9 +347,15 @@ void send_frame (
   }
   if (frame_data) {
     frame_data[frame_size] = '\0';
-    if (write (client->fd, frame_data, frame_size) <= 0) {
-      perror ("write() ");
-    }
+    buf2 = frame_data;
+    do {
+      if ((retval = write (client->fd, buf2, frame_size)) <= 0) {
+        perror ("write() ");
+        if (retval < 0 && (errno != EAGAIN && errno != EWOULDBLOCK)) break;
+        frame_size -= retval;
+        buf2 += retval;
+      }
+    } while ((errno == EAGAIN || errno == EWOULDBLOCK) && frame_size > 0);
     free (frame_data);
   }
 }
