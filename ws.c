@@ -1,7 +1,12 @@
 #include "ws.h"
 #include <unistd.h>
+#include <errno.h>
 
 static int handle_verify (ws_client * client);
+static int closesocket(int fd) {
+  shutdown(fd, SHUT_RDWR);
+  return close(fd);
+}
 static int create_and_bind (const char *port)
 {
 
@@ -25,7 +30,7 @@ static int create_and_bind (const char *port)
       continue;
 
     if (setsockopt(sfd, SOL_SOCKET, SO_REUSEADDR, (char *)&on, sizeof(on)) < 0) {
-      close(sfd);
+      closesocket(sfd);
       continue;
     }
 
@@ -35,7 +40,7 @@ static int create_and_bind (const char *port)
       break;
     }
 
-    close (sfd);
+    closesocket (sfd);
   }
 
   if (rp == NULL) {
@@ -123,7 +128,7 @@ void close_client (ws_client * client)
   if (client != NULL) {
     ws_server *server = client->server;
     my_epoll_delete(server->epollfd, client->fd);
-    close (client->fd);
+    closesocket (client->fd);
     free (client->data);
     if (client->fd < server->max_fd) {
       server->clients[client->fd] = (struct client) { 0 };      // delete the client
@@ -137,6 +142,9 @@ void get_frame (ws_client * client)
   char buffer[BUFFER_SIZE];
   int read_size = read (client->fd, buffer, BUFFER_SIZE);
   if (read_size <= 0) {
+    if (read_size < 0 && errno == EWOULDBLOCK) {
+      return;
+    }
     close_client (client);
     return;
   }
@@ -446,19 +454,19 @@ void event_loop (ws_server * server)
         //int  flags = fcntl(fd, F_GETFL, 0);
         //fcntl(conn_sock, F_SETFL, flags | O_NONBLOCK);
         if (setNonblocking (conn_sock) < 0) {
-          close(conn_sock);
+          closesocket(conn_sock);
           continue;
         }
 
         //if(server->current_event_size == )
         if (my_epoll_add (server->epollfd, conn_sock, EPOLLIN | EPOLLET) == -1) {
-          close(conn_sock);
+          closesocket(conn_sock);
           continue;
         }
         server->current_event_size += 1;
         if (NULL == create_client (conn_sock, server)) {
           my_epoll_delete(server->epollfd, conn_sock);
-          close(conn_sock);
+          closesocket(conn_sock);
         }
 
       } else {
@@ -510,7 +518,7 @@ ws_server *create_server (const char *port)
   return server;
 
 clean_up:
-  if (server->epollfd != -1) close(server->epollfd);
+  if (server->epollfd != -1) closesocket(server->epollfd);
   if (server->events) free (server->events);
   if (server->clients) free (server->clients);
   free(server);
