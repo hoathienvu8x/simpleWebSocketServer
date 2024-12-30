@@ -467,6 +467,7 @@ void event_loop (ws_server * server)
         conn_sock = accept (server->listen_sock,
                             (struct sockaddr *) &servaddr, &addrlen);
         if (conn_sock == -1) {
+          if (errno == EAGAIN || errno == EWOULDBLOCK) continue;
           perror ("accept");
           //exit(EXIT_FAILURE);
         }
