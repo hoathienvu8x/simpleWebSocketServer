@@ -11,7 +11,10 @@ static void onclose(ws_client *cli) {
 }
 
 static void ondata(ws_client *cli, const char *data, size_t len) {
-  printf("recv (%ld): %s\n", len, data);
+  if (len < BUFFER_SIZE)
+    printf("recv (%ld): %s\n", len, data);
+  else
+    printf("recv (%ld)\n", len);
   const char *resp = "s[\"good job\"]";
   handle_text(cli, (char *)resp, strlen(resp));
 }
