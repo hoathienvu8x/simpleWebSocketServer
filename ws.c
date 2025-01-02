@@ -127,8 +127,6 @@ void close_client (ws_client * client)
 {
   if (client != NULL) {
     ws_server *server = client->server;
-    if (server->onclose)
-      server->onclose(client);
     my_epoll_delete(server->epollfd, client->fd);
     closesocket (client->fd);
     free (client->data);
@@ -171,7 +169,7 @@ void get_frame (ws_client * client)
   if (!client->state) {
     int result = handle_verify (client);
     if (result) {
-      //close_client(client);
+      close_client(client);
       return;
     }
     if (client->server->onopen)
@@ -240,56 +238,54 @@ static int handle_verify (ws_client * client)
   //split the request and then get the  header "sec-websocket-key" and the get the value
 
   char *http_header = strstr (client->data, "\r\n\r\n");
-  if (http_header) {
+  if (!http_header) return -1;
+  if (strncasecmp(client->data, "GET ", 4) != 0) return -1;
+  char *start = NULL;
+  start = strstr (client->data, "Sec-WebSocket-Key");
+  if (!start) return -1;
+  char *end = strstr (start, "\r\n");
+  char sec[255] = { 0 };
+  strncpy (sec, start, end - start);
 
-    char *start = NULL;
-    start = strstr (client->data, "Sec-WebSocket-Key");
-    if (start != NULL) {
-      char *end = strstr (start, "\r\n");
-      char sec[255] = { 0 };
-      strncpy (sec, start, end - start);
-
-      static char *const_key = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
-      char secure_key[255] = { 0 };
-      char *key = strstr (sec, ":") + 2;
-      sprintf (secure_key, "%s%s", key, const_key);
-      key = get_socket_secure_key ((const unsigned char *)secure_key);
-      if (!key)
-        return -1;
-      char *res_header_str =
-        "HTTP/1.1 101 Web Socket Protocol Handshake\r\nUpgrade: "
-        "WebSocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: %s%s";
-      char *double_newline = "\r\n\r\n";;
-      char msg[255] = { 0 };
-      if (sprintf (msg, res_header_str, key, double_newline) <= 0) {
-        return -1;
-      }
-      free (key);
-      char *buf2 = msg;
-      size_t slen = strlen(msg);
-      int retval = 0;
-      do {
-        retval = write (client->fd, buf2, slen);
-        if (retval < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) continue;
-        if (retval == 0) {
-          close_client (client);
-          break;
-        }
-        buf2 += retval;
-        slen -= (size_t)retval;
-      } while ((errno == EAGAIN || errno == EWOULDBLOCK) && slen > 0);
-
-      if (slen != 0) return -1;
-
-      int http_header_len = http_header - client->data + 4;
-      //copy the remain data
-      memset (client->data, '0', http_header_len);    //
-      char *remain = client->data + http_header_len;
-      client->assgined = client->assgined - http_header_len;
-      memcpy (client->data, remain, client->assgined);
-      client->state = 1;
-    }
+  static char *const_key = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+  char secure_key[255] = { 0 };
+  char *key = strstr (sec, ":") + 2;
+  sprintf (secure_key, "%s%s", key, const_key);
+  key = get_socket_secure_key ((const unsigned char *)secure_key);
+  if (!key)
+    return -1;
+  char *res_header_str =
+    "HTTP/1.1 101 Web Socket Protocol Handshake\r\nUpgrade: "
+    "WebSocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: %s%s";
+  char *double_newline = "\r\n\r\n";;
+  char msg[255] = { 0 };
+  if (sprintf (msg, res_header_str, key, double_newline) <= 0) {
+    return -1;
   }
+  free (key);
+  char *buf2 = msg;
+  size_t slen = strlen(msg);
+  int retval = 0;
+  do {
+    retval = write (client->fd, buf2, slen);
+    if (retval < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) continue;
+    if (retval == 0) {
+      close_client (client);
+      break;
+    }
+    buf2 += retval;
+    slen -= (size_t)retval;
+  } while ((errno == EAGAIN || errno == EWOULDBLOCK) && slen > 0);
+
+  if (slen != 0) return -1;
+
+  int http_header_len = http_header - client->data + 4;
+  //copy the remain data
+  memset (client->data, '0', http_header_len);    //
+  char *remain = client->data + http_header_len;
+  client->assgined = client->assgined - http_header_len;
+  memcpy (client->data, remain, client->assgined);
+  client->state = 1;
   return 0;
 }
 
@@ -437,6 +433,8 @@ void handle_close (ws_client * client, int code, char *reason)
   send_frame (client, close_opcode, payload, payload_size);
   // remove the fd in epoll event set and close the socket
   free (payload);
+  if (client->server->onclose)
+    client->server->onclose(client);
   close_client (client);
 }
 
