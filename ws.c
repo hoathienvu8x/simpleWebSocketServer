@@ -127,6 +127,8 @@ void close_client (ws_client * client)
 {
   if (client != NULL) {
     ws_server *server = client->server;
+    if (server->onclose)
+      server->onclose(client);
     my_epoll_delete(server->epollfd, client->fd);
     closesocket (client->fd);
     free (client->data);
@@ -168,10 +170,12 @@ void get_frame (ws_client * client)
 
   if (!client->state) {
     int result = handle_verify (client);
-    if (!result) {
+    if (result) {
       //close_client(client);
       return;
     }
+    if (client->server->onopen)
+      client->server->onopen(client);
   }
   //get websocket frame
   if (client->data && client->state == 1) {
@@ -231,64 +235,61 @@ void get_frame (ws_client * client)
 static int handle_verify (ws_client * client)
 {
   if (!client) return -1;
-  if (!client->state) {
-    //get all http request data and then parse it
-    //split the request and then get the  header "sec-websocket-key" and the get the value
+  if (client->state) return 0;
+  //get all http request data and then parse it
+  //split the request and then get the  header "sec-websocket-key" and the get the value
 
-    char *http_header = strstr (client->data, "\r\n\r\n");
-    if (http_header) {
+  char *http_header = strstr (client->data, "\r\n\r\n");
+  if (http_header) {
 
-      char *start = NULL;
-      start = strstr (client->data, "Sec-WebSocket-Key");
-      if (start != NULL) {
-        char *end = strstr (start, "\r\n");
-        char sec[255] = { 0 };
-        strncpy (sec, start, end - start);
+    char *start = NULL;
+    start = strstr (client->data, "Sec-WebSocket-Key");
+    if (start != NULL) {
+      char *end = strstr (start, "\r\n");
+      char sec[255] = { 0 };
+      strncpy (sec, start, end - start);
 
-        static char *const_key = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
-        char secure_key[255] = { 0 };
-        char *key = strstr (sec, ":") + 2;
-        sprintf (secure_key, "%s%s", key, const_key);
-        key = get_socket_secure_key ((const unsigned char *)secure_key);
-        if (!key)
-          return -1;
-        char *res_header_str =
-          "HTTP/1.1 101 Web Socket Protocol Handshake\r\nUpgrade: "
-          "WebSocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: %s%s";
-        char *double_newline = "\r\n\r\n";;
-        char msg[255] = { 0 };
-        if (sprintf (msg, res_header_str, key, double_newline) <= 0) {
-          return -1;
-        }
-        char *buf2 = msg;
-        size_t slen = strlen(msg);
-        int retval = 0;
-        do {
-          if ((retval = write (client->fd, buf2, slen)) <= 0) {
-            if (retval < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) continue;
-            if (retval == 0) {
-              close_client (client);
-              break;
-            }
-            buf2 += retval;
-            slen -= (size_t)retval;
-          }
-        } while ((errno == EAGAIN || errno == EWOULDBLOCK) && slen > 0);
-
-        int http_header_len = http_header - client->data + 4;
-
-        //copy the remain data 
-        memset (client->data, '0', http_header_len);    //
-        char *remain = client->data + http_header_len;
-        client->assgined = client->assgined - http_header_len;
-        memcpy (client->data, remain, client->assgined);
-        client->state = 1;
-        free (key);
+      static char *const_key = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+      char secure_key[255] = { 0 };
+      char *key = strstr (sec, ":") + 2;
+      sprintf (secure_key, "%s%s", key, const_key);
+      key = get_socket_secure_key ((const unsigned char *)secure_key);
+      if (!key)
+        return -1;
+      char *res_header_str =
+        "HTTP/1.1 101 Web Socket Protocol Handshake\r\nUpgrade: "
+        "WebSocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: %s%s";
+      char *double_newline = "\r\n\r\n";;
+      char msg[255] = { 0 };
+      if (sprintf (msg, res_header_str, key, double_newline) <= 0) {
+        return -1;
       }
+      free (key);
+      char *buf2 = msg;
+      size_t slen = strlen(msg);
+      int retval = 0;
+      do {
+        retval = write (client->fd, buf2, slen);
+        if (retval < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) continue;
+        if (retval == 0) {
+          close_client (client);
+          break;
+        }
+        buf2 += retval;
+        slen -= (size_t)retval;
+      } while ((errno == EAGAIN || errno == EWOULDBLOCK) && slen > 0);
+
+      if (slen != 0) return -1;
+
+      int http_header_len = http_header - client->data + 4;
+      //copy the remain data
+      memset (client->data, '0', http_header_len);    //
+      char *remain = client->data + http_header_len;
+      client->assgined = client->assgined - http_header_len;
+      memcpy (client->data, remain, client->assgined);
+      client->state = 1;
     }
-
   }
-
   return 0;
 }
 
@@ -349,13 +350,14 @@ void send_frame (
     frame_data[frame_size] = '\0';
     buf2 = frame_data;
     do {
-      if ((retval = write (client->fd, buf2, frame_size)) <= 0) {
-        perror ("write() ");
-        if (retval < 0 && (errno != EAGAIN && errno != EWOULDBLOCK)) break;
-        frame_size -= retval;
-        buf2 += retval;
-      }
+      retval = write (client->fd, buf2, frame_size);
+      if (retval < 0 && (errno != EAGAIN && errno != EWOULDBLOCK)) break;
+      frame_size -= retval;
+      buf2 += retval;
     } while ((errno == EAGAIN || errno == EWOULDBLOCK) && frame_size > 0);
+    if (frame_size > 0) {
+      printf("send frame data is not completed\n");
+    }
     free (frame_data);
   }
 }
@@ -368,20 +370,24 @@ void handle_all_frame (ws_client * client, ws_frame * frame)
   //handle the ws_frame
   enum opcode enum_opcode = (enum opcode) frame->opcode;
   switch (enum_opcode) {
-  case TEXT:
-    //handle_text(client,frame->payload,strlen(frame->payload));
-    broadcast (client->server, frame->payload);
-    break;
+  case TEXT: {
+      //handle_text(client,frame->payload,strlen(frame->payload));
+      //broadcast (client->server, frame->payload);
+      if (client->server->onmessage)
+        client->server->onmessage(
+          client, frame->payload, strlen(frame->payload)
+        );
+    } break;
   case BINARY:
     break;
-  case CLOSE:
-    if (strlen (frame->payload) > 2) {
-
-    }
-    short close_code = (short) *(frame->payload);
-    char *reason = &frame->payload[2];
-    handle_close (client, close_code, reason);
-    break;
+  case CLOSE: {
+      char *reason = NULL;
+      if (strlen (frame->payload) > 2) {
+        reason = &frame->payload[2];
+      }
+      short close_code = (short) *(frame->payload);
+      handle_close (client, close_code, reason);
+    } break;
   case PING:
     handle_ping (client);
     break;
@@ -412,14 +418,13 @@ void handle_ping (ws_client * client)
   char *payload = "pong pong";
   enum opcode enum_opcode = PONG;
   send_frame (client, enum_opcode, payload, strlen (payload));
-
 }
 
 void handle_close (ws_client * client, int code, char *reason)
 {
   if (!client) return;
   //handle the close
-  int reason_size = strlen (reason);
+  int reason_size = reason ? strlen (reason) : 0;
   enum opcode close_opcode = CLOSE;
   int payload_size = reason_size + 2;
   char *payload = (char *) malloc (sizeof (char) * payload_size);
@@ -427,7 +432,8 @@ void handle_close (ws_client * client, int code, char *reason)
     return;
   payload[0] = (code >> 24) & 0xFF;
   payload[1] = (code >> 16) & 0xFF;
-  memcpy (payload, reason, 2);
+  if (reason)
+    memcpy (payload, reason, 2);
   send_frame (client, close_opcode, payload, payload_size);
   // remove the fd in epoll event set and close the socket
   free (payload);
@@ -534,6 +540,9 @@ ws_server *create_server (const char *port)
     perror ("epoll_ctl: listen_sock");
     goto clean_up;
   }
+  server->onopen = NULL;
+  server->onmessage = NULL;
+  server->onclose = NULL;
   return server;
 
 clean_up:

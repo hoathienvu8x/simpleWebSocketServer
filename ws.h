@@ -14,17 +14,6 @@
 #define BUFFER_SIZE 4096
 #define MAX_EVENTS 1024
 
-// setting the listen socket
-// loop accept get an endpoint
-// add endpoint in to the loop
-// if the endpoint have receive data 
-// read data and  parse it specify protocol
-
-//struct epoll_event ev, events[MAX_EVENTS];
-// struct sockaddr_in servaddr;
-//typedef struct server ws_server;
-// int listen_sock, epollfd, addrlen;
-
 typedef struct frame {
   int opcode;
   char *payload;
@@ -59,6 +48,9 @@ struct server {
   int event_size;               //
   int current_event_size;
   int max_fd;                   //current max fd
+  void (*onopen)(ws_client *);
+  void (*onclose)(ws_client *);
+  void (*onmessage)(ws_client *, const char *, size_t);
 };
 
 char *unmask (char *mask_bytes, char *buffer, int buffer_size);
