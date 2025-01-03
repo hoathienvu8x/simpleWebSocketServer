@@ -17,6 +17,7 @@
 typedef struct frame {
   int opcode;
   char *payload;
+  size_t payload_len;
 } ws_frame;
 
 enum opcode {
@@ -50,7 +51,9 @@ struct server {
   int max_fd;                   //current max fd
   void (*onopen)(ws_client *);
   void (*onclose)(ws_client *);
-  void (*onmessage)(ws_client *, const char *, size_t);
+  void (*onping)(ws_client *);
+  void (*onpong)(ws_client *);
+  void (*onmessage)(ws_client *, int, const char *, size_t);
 };
 
 char *unmask (char *mask_bytes, char *buffer, int buffer_size);
@@ -62,5 +65,6 @@ void handle_text (ws_client * client, char *payload, int payload_size);
 void broadcast (ws_server *server, char *msg);
 ws_server *create_server (const char *port);
 void event_loop (ws_server * server);
+void event_loop_dispose(ws_server *server);
 
 #endif

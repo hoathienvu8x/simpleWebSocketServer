@@ -20,7 +20,9 @@ static int create_and_bind (const char *port)
 
   s = getaddrinfo (NULL, port, &hints, &result);
   if (s != 0) {
+    #ifndef NDEBUG
     fprintf (stderr, "getaddrinfo: %s\n", gai_strerror (s));
+    #endif
     return -1;
   }
 
@@ -45,7 +47,9 @@ static int create_and_bind (const char *port)
 
   if (rp == NULL) {
     freeaddrinfo (result);
+    #ifndef NDEBUG
     fprintf (stderr, "Could not bind\n");
+    #endif
     return -1;
   }
 
@@ -61,14 +65,18 @@ int setNonblocking (int sfd)
 
   flags = fcntl (sfd, F_GETFL, 0);
   if (flags == -1) {
+    #ifndef NDEBUG
     perror ("fcntl");
+    #endif
     return -1;
   }
 
   flags |= O_NONBLOCK;
   s = fcntl (sfd, F_SETFL, flags);
   if (s == -1) {
+    #ifndef NDEBUG
     perror ("fcntl");
+    #endif
     return -1;
   }
 
@@ -85,7 +93,9 @@ static int my_epoll_add(int epoll_fd, int fd, uint32_t events)
   event.events  = events;
   event.data.fd = fd;
   if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, fd, &event) < 0) {
+    #ifndef NDEBUG
     perror("my_epoll_add(): ");
+    #endif
     return -1;
   }
   return 0;
@@ -94,7 +104,9 @@ static int my_epoll_add(int epoll_fd, int fd, uint32_t events)
 static int my_epoll_delete(int epoll_fd, int fd)
 {
   if (epoll_ctl(epoll_fd, EPOLL_CTL_DEL, fd, NULL) < 0) {
+    #ifndef NDEBUG
     perror("my_epoll_delete(): ");
+    #endif
     return -1;
   }
   return 0;
@@ -224,6 +236,7 @@ void get_frame (ws_client * client)
       return;
     frame->opcode = opcode;
     frame->payload = payload;
+    frame->payload_len = len;
     handle_all_frame (client, frame);
   }
 }
@@ -351,9 +364,11 @@ void send_frame (
       frame_size -= retval;
       buf2 += retval;
     } while ((errno == EAGAIN || errno == EWOULDBLOCK) && frame_size > 0);
+    #ifndef NDEBUG
     if (frame_size > 0) {
       printf("send frame data is not completed\n");
     }
+    #endif
     free (frame_data);
   }
 }
@@ -371,7 +386,7 @@ void handle_all_frame (ws_client * client, ws_frame * frame)
       //broadcast (client->server, frame->payload);
       if (client->server->onmessage)
         client->server->onmessage(
-          client, frame->payload, strlen(frame->payload)
+          client, frame->opcode, frame->payload, frame->payload_len
         );
     } break;
   case BINARY:
@@ -384,11 +399,16 @@ void handle_all_frame (ws_client * client, ws_frame * frame)
       short close_code = (short) *(frame->payload);
       handle_close (client, close_code, reason);
     } break;
-  case PING:
-    handle_ping (client);
-    break;
-  case PONG:
-    break;
+  case PING: {
+    if (client->server->onping)
+      client->server->onping(client);
+    else
+      handle_ping (client);
+    } break;
+  case PONG: {
+      if (client->server->onpong)
+        client->server->onpong(client);
+    } break;
   default:
     handle_close (client, 1002, "unknown opcode");
   }
@@ -462,7 +482,9 @@ void event_loop (ws_server * server)
   for (;;) {
     nfds = epoll_wait (server->epollfd, server->events, MAX_EVENTS, -1);
     if (nfds == -1) {
+      #ifndef NDEBUG
       perror ("epoll_wait");
+      #endif
       //exit(EXIT_FAILURE);
     }
     int n, client_index;
@@ -472,7 +494,9 @@ void event_loop (ws_server * server)
                             (struct sockaddr *) &servaddr, &addrlen);
         if (conn_sock == -1) {
           if (errno == EAGAIN || errno == EWOULDBLOCK) continue;
+          #ifndef NDEBUG
           perror ("accept");
+          #endif
           //exit(EXIT_FAILURE);
         }
         //int  flags = fcntl(fd, F_GETFL, 0);
@@ -505,12 +529,13 @@ void event_loop (ws_server * server)
 ws_server *create_server (const char *port)
 {
   int s;
-  struct epoll_event ev;
   int listen_sock = create_and_bind (port);
 
   s = listen (listen_sock, MAX_EVENTS);
   if (s < 0) {
+    #ifndef NDEBUG
     printf ("error listen");
+    #endif
     return NULL;
   }
   ws_server *server = (ws_server *) malloc (sizeof (ws_server));
@@ -518,7 +543,7 @@ ws_server *create_server (const char *port)
     return NULL;
 
   server->epollfd = epoll_create1 (0);
-  server->events = calloc (MAX_EVENTS, sizeof (ev));
+  server->events = calloc (MAX_EVENTS, sizeof (struct epoll_event));
   server->listen_sock = listen_sock;
 
   if (!server->events) {
@@ -530,18 +555,22 @@ ws_server *create_server (const char *port)
     goto clean_up;
   }
   if (server->epollfd == -1) {
+    #ifndef NDEBUG
     perror ("epoll_create1");
+    #endif
     goto clean_up;
   }
-  ev.events = EPOLLIN;
-  ev.data.fd = listen_sock;
-  if (epoll_ctl (server->epollfd, EPOLL_CTL_ADD, listen_sock, &ev) == -1) {
+  if (my_epoll_add (server->epollfd, listen_sock, EPOLLIN) == -1) {
+    #ifndef NDEBUG
     perror ("epoll_ctl: listen_sock");
+    #endif
     goto clean_up;
   }
   server->onopen = NULL;
   server->onmessage = NULL;
   server->onclose = NULL;
+  server->onping = NULL;
+  server->onpong = NULL;
   return server;
 
 clean_up:
@@ -563,4 +592,14 @@ void broadcast (ws_server *server, char *msg)
       handle_text (client, msg, msg_len);
     }
   }
+}
+void event_loop_dispose(ws_server *server) {
+  if (!server) return;
+  if (server->clients) {
+    for (int i = 0; i < server->max_fd; i++) {
+      close_client(&server->clients[i]);
+    }
+  }
+  free(server->clients);
+  free(server);
 }
