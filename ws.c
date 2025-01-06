@@ -506,6 +506,19 @@ void event_loop (ws_server * server)
           continue;
         }
 
+        struct timeval tv;
+        tv.tv_sec = 10;
+        tv.tv_usec = 0;
+        if (setsockopt(conn_sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof(tv)) < 0) {
+          closesocket(conn_sock);
+          continue;
+        }
+
+        if (setsockopt(conn_sock, SOL_SOCKET, SO_SNDTIMEO, (const char*)&tv, sizeof(tv)) < 0) {
+          closesocket(conn_sock);
+          continue;
+        }
+
         //if(server->current_event_size == )
         if (my_epoll_add (server->epollfd, conn_sock, EPOLLIN | EPOLLET) == -1) {
           closesocket(conn_sock);
