@@ -43,6 +43,7 @@ struct server {
   ws_client *clients;           //all of the connection client
   int client_size;              // client scale
   int epollfd;                  //epoll listenfd
+  int time_fd;
   int listen_sock;
   struct epoll_event *events;   //monitor event list
   int event_size;               //

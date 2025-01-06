@@ -1,6 +1,7 @@
 #include "ws.h"
 #include <unistd.h>
 #include <errno.h>
+#include <sys/timerfd.h>
 
 static int handle_verify (ws_client * client);
 static int closesocket(int fd) {
@@ -482,6 +483,27 @@ void event_loop (ws_server * server)
   int conn_sock, nfds;
   struct sockaddr_in servaddr;
   socklen_t addrlen = sizeof(servaddr);
+  if (server->timeout > 0) {
+    int time_fd = timerfd_create(CLOCK_MONOTONIC, 0);
+    if (time_fd > 0) {
+      if (my_epoll_add(server->epollfd, time_fd, EPOLLIN | EPOLLET) < 0) {
+        closesocket(time_fd);
+      } else {
+        server->time_fd = time_fd;
+        struct itimerspec its;
+        its.it_value.tv_sec = server->timeout > 1000 ? server->timeout / 1000 : 0;
+        its.it_value.tv_nsec = server->timeout > 1000 ? (server->timeout % 1000) % 1000 : server->timeout;
+        its.it_interval = its.it_value;
+        if (timerfd_settime(server->time_fd, 0, &its, NULL) != 0) {
+          my_epoll_delete(server->epollfd, server->time_fd);
+          closesocket(server->time_fd);
+        } else {
+          printf("time_fd = %d init\n", server->time_fd);
+        }
+      }
+    }
+  }
+
   for (;;) {
     nfds = epoll_wait (server->epollfd, server->events, MAX_EVENTS, -1);
     if (nfds == -1) {
@@ -531,6 +553,15 @@ void event_loop (ws_server * server)
           closesocket(conn_sock);
         }
 
+      } else if (server->events[n].data.fd == server->time_fd) {
+        unsigned long long val;
+        static int n_id;
+        int rcc = 0;
+        printf("%d\n", server->events[n].data.fd);
+        if ((rcc = read(server->events[n].data.fd, &val, sizeof(val))) > 0) {
+          printf("Received timerfd event via epoll: %d\n", n_id++);
+        }
+        printf("rcc = %d\n",rcc);
       } else {
         client_index = server->events[n].data.fd;
         get_frame (&server->clients[client_index]);
@@ -560,6 +591,7 @@ ws_server *create_server (const char *port)
   server->events = calloc (MAX_EVENTS, sizeof (struct epoll_event));
   server->listen_sock = listen_sock;
   server->timeout = 10000;
+  server->time_fd = -1;
 
   if (!server->events) {
     goto clean_up;
@@ -610,6 +642,9 @@ void broadcast (ws_server *server, char *msg)
 }
 void event_loop_dispose(ws_server *server) {
   if (!server) return;
+  closesocket(server->epollfd);
+  closesocket(server->listen_sock);
+  closesocket(server->time_fd);
   if (server->clients) {
     for (int i = 0; i < server->max_fd; i++) {
       close_client(&server->clients[i]);
