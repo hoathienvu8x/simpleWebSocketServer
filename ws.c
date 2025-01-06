@@ -161,7 +161,6 @@ void get_frame (ws_client * client)
     return;
   }
   if (read_size > client->size - client->assgined) {
-
     //reallocate the client's buffer
     client->data =
       (char *) realloc (client->data, client->size + read_size * 2 + 1);
@@ -194,7 +193,7 @@ void get_frame (ws_client * client)
     uint opcode = byte_one & 0x0f;
     char byte_two = client->data[1];
     int mask = byte_two & 0x80;
-    uint16_t len = byte_two & 0x7f;
+    uint64_t len = byte_two & 0x7f;
     if (opcode > 125) {
       if (client->assgined < 8) {
         close_client (client);
@@ -202,18 +201,23 @@ void get_frame (ws_client * client)
       }
     }
     if (len == 126) {
-      len = *((uint16_t *) & client->data[2]);
+      len = ((((uint64_t)client->data[2])) << 8 | client->data[3]);
       idx += 2;
     } else if (len == 127) {
-      uint32_t highBits = *(uint32_t *) & client->data[2];
-      if (highBits != 0) {
-
-      }
-      len = *(uint32_t *) & client->data[5];
+      len = (
+        (((uint64_t)client->data[2]) << 56) |
+        (((uint64_t)client->data[3]) << 48) |
+        (((uint64_t)client->data[4]) << 40) |
+        (((uint64_t)client->data[5]) << 32) |
+        (((uint64_t)client->data[6]) << 24) |
+        (((uint64_t)client->data[7]) << 16) |
+        (((uint64_t)client->data[8]) << 8) |
+        (uint64_t)client->data[9]
+      );
       idx += 8;
 
     }
-    if (client->assgined < idx + 4 + len) {
+    if ((uint64_t)client->assgined < idx + 4 + len) {
       return;
     }
     char *payload = NULL;
@@ -283,7 +287,6 @@ static int handle_verify (ws_client * client)
     retval = write (client->fd, buf2, slen);
     if (retval < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) continue;
     if (retval == 0) {
-      close_client (client);
       break;
     }
     buf2 += retval;
@@ -485,7 +488,7 @@ void event_loop (ws_server * server)
       #ifndef NDEBUG
       perror ("epoll_wait");
       #endif
-      //exit(EXIT_FAILURE);
+      exit(EXIT_FAILURE);
     }
     int n, client_index;
     for (n = 0; n < nfds; ++n) {
@@ -497,10 +500,8 @@ void event_loop (ws_server * server)
           #ifndef NDEBUG
           perror ("accept");
           #endif
-          //exit(EXIT_FAILURE);
+          exit(EXIT_FAILURE);
         }
-        //int  flags = fcntl(fd, F_GETFL, 0);
-        //fcntl(conn_sock, F_SETFL, flags | O_NONBLOCK);
         if (setNonblocking (conn_sock) < 0) {
           closesocket(conn_sock);
           continue;
@@ -520,7 +521,6 @@ void event_loop (ws_server * server)
             continue;
           }
         }
-        //if(server->current_event_size == )
         if (my_epoll_add (server->epollfd, conn_sock, EPOLLIN | EPOLLET) == -1) {
           closesocket(conn_sock);
           continue;

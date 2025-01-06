@@ -39,7 +39,6 @@ struct client {
   ws_server *server;
 };
 
-
 struct server {
   ws_client *clients;           //all of the connection client
   int client_size;              // client scale
