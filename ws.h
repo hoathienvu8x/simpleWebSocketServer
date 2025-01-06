@@ -49,6 +49,7 @@ struct server {
   int event_size;               //
   int current_event_size;
   int max_fd;                   //current max fd
+  unsigned int timeout;
   void (*onopen)(ws_client *);
   void (*onclose)(ws_client *);
   void (*onping)(ws_client *);
@@ -64,6 +65,7 @@ void handle_close (ws_client * client, int code, char *reason);
 void handle_text (ws_client * client, char *payload, int payload_size);
 void broadcast (ws_server *server, char *msg);
 ws_server *create_server (const char *port);
+void ws_server_set_timeout(ws_server *srv, unsigned int timeout);
 void event_loop (ws_server * server);
 void event_loop_dispose(ws_server *server);
 

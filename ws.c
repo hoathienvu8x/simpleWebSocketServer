@@ -506,19 +506,20 @@ void event_loop (ws_server * server)
           continue;
         }
 
-        struct timeval tv;
-        tv.tv_sec = 10;
-        tv.tv_usec = 0;
-        if (setsockopt(conn_sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof(tv)) < 0) {
-          closesocket(conn_sock);
-          continue;
-        }
+        if (server->timeout > 1000) {
+          struct timeval tv;
+          tv.tv_sec = server->timeout / 1000;
+          tv.tv_usec = (server->timeout % 1000) * 1000;
+          if (setsockopt(conn_sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof(tv)) < 0) {
+            closesocket(conn_sock);
+            continue;
+          }
 
-        if (setsockopt(conn_sock, SOL_SOCKET, SO_SNDTIMEO, (const char*)&tv, sizeof(tv)) < 0) {
-          closesocket(conn_sock);
-          continue;
+          if (setsockopt(conn_sock, SOL_SOCKET, SO_SNDTIMEO, (const char*)&tv, sizeof(tv)) < 0) {
+            closesocket(conn_sock);
+            continue;
+          }
         }
-
         //if(server->current_event_size == )
         if (my_epoll_add (server->epollfd, conn_sock, EPOLLIN | EPOLLET) == -1) {
           closesocket(conn_sock);
@@ -558,6 +559,7 @@ ws_server *create_server (const char *port)
   server->epollfd = epoll_create1 (0);
   server->events = calloc (MAX_EVENTS, sizeof (struct epoll_event));
   server->listen_sock = listen_sock;
+  server->timeout = 10000;
 
   if (!server->events) {
     goto clean_up;
@@ -615,4 +617,8 @@ void event_loop_dispose(ws_server *server) {
   }
   free(server->clients);
   free(server);
+}
+void ws_server_set_timeout(ws_server *srv, unsigned int timeout) {
+  if (!srv) return;
+  srv->timeout = timeout;
 }
