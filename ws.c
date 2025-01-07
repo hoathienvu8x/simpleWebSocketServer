@@ -1,7 +1,10 @@
 #include "ws.h"
 #include <unistd.h>
 #include <errno.h>
+#include <math.h>
 #include <sys/timerfd.h>
+
+#define MAX_WS_PAD (BUFFER_SIZE - 10)
 
 static int handle_verify (ws_client * client);
 static int closesocket(int fd) {
@@ -310,70 +313,57 @@ void send_frame (
   ws_client * client, int opcode, char *payload, int payload_size
 ) {
   if (!client) return;
-  int frame_size = payload_size;
-  int retval = 0;
-  char op_code = 0x80 | opcode;
-  char b2 = 0;
-  char *frame_data = NULL;
+  int i, retval = 0;
+  int frame_count = ceil((float)payload_size / (float)MAX_WS_PAD);
+  if (frame_count == 0) frame_count = 1;
   char *buf2 = NULL;
-  if (payload_size < 126) {
-    frame_size += 2;
-    frame_data = (char *) malloc (sizeof (char) * frame_size + 1);
-    if (!frame_data)
-      return;
-
-    frame_data[0] = op_code;
-    b2 |= payload_size;
-    frame_data[1] = b2;
-    memcpy (frame_data + 2, payload, payload_size);
-  } else if (payload_size == 126) {
-    frame_size += 4;
-    frame_data = (char *) malloc (sizeof (char) * frame_size + 1);
-    if (!frame_data)
-      return;
-
-    frame_data[0] = op_code;
-    b2 |= payload_size;
-    frame_data[1] = b2;
-    char *payload_size_extra = (char *) &payload_size;
-    frame_data[2] = payload_size_extra[0];
-    frame_data[3] = payload_size_extra[1];
-    memcpy (frame_data + 4, payload, payload_size);
-  } else {
-    frame_size += 10;
-    b2 |= 127;
-    frame_data = (char *) malloc (sizeof (char) * frame_size + 1);
-    if (!frame_data)
-      return;
-
-    frame_data[0] = op_code;
-    frame_data[1] = b2;
-    frame_data[2] = (0 >> 24) & 0xFF;
-    frame_data[3] = (0 >> 16) & 0xFF;
-    frame_data[4] = (0 >> 8) & 0xFF;
-    frame_data[5] = 0 & 0xFF;
-    frame_data[6] = (payload_size >> 24) & 0xFF;
-    frame_data[7] = (payload_size >> 16) & 0xFF;
-    frame_data[8] = (payload_size >> 8) & 0xFF;
-    frame_data[9] = payload_size & 0xFF;
-    memcpy (frame_data + 10, payload, payload_size);
-
-  }
-  if (frame_data) {
-    frame_data[frame_size] = '\0';
+  char frame_data[BUFFER_SIZE] = {0};
+  for (i = 0; i < frame_count; i++) {
+    int frame_size = i != frame_count - 1 ? MAX_WS_PAD : payload_size % MAX_WS_PAD;
+    char op_code = i != 0 ? 0x0 : 0x80 | opcode;
+    char fin = i != frame_count - 1 ? 0x0 : 0x1;
+    memset(frame_data, 0, sizeof(frame_data));
+    int frame_length = frame_size;
+    if (frame_size < 126) {
+      frame_data[0] = fin | op_code;
+      frame_data[1] = frame_size;
+      memcpy (frame_data + 2, &payload[i * MAX_WS_PAD], frame_size);
+      frame_length += 2;
+    } else if (frame_size == 126) {
+      frame_data[0] = fin | op_code;
+      frame_data[1] = frame_size;
+      char *payload_size_extra = (char *) &frame_size;
+      frame_data[2] = payload_size_extra[0];
+      frame_data[3] = payload_size_extra[1];
+      memcpy (frame_data + 4, &payload[i * MAX_WS_PAD], frame_size);
+      frame_length += 4;
+    } else {
+      frame_data[0] = fin | op_code;
+      frame_data[1] = 127;
+      frame_data[2] = (0 >> 24) & 0xFF;
+      frame_data[3] = (0 >> 16) & 0xFF;
+      frame_data[4] = (0 >> 8) & 0xFF;
+      frame_data[5] = 0 & 0xFF;
+      frame_data[6] = (frame_size >> 24) & 0xFF;
+      frame_data[7] = (frame_size >> 16) & 0xFF;
+      frame_data[8] = (frame_size >> 8) & 0xFF;
+      frame_data[9] = frame_size & 0xFF;
+      memcpy (frame_data + 10, &payload[i * MAX_WS_PAD], frame_size);
+      frame_length += 10;
+    }
+    frame_data[frame_length] = '\0';
     buf2 = frame_data;
     do {
-      retval = write (client->fd, buf2, frame_size);
+      retval = write (client->fd, buf2, frame_length);
       if (retval < 0 && (errno != EAGAIN && errno != EWOULDBLOCK)) break;
-      frame_size -= retval;
+      frame_length -= retval;
       buf2 += retval;
-    } while ((errno == EAGAIN || errno == EWOULDBLOCK) && frame_size > 0);
+    } while ((errno == EAGAIN || errno == EWOULDBLOCK) && frame_length > 0);
     #ifndef NDEBUG
-    if (frame_size > 0) {
+    if (frame_length > 0) {
       printf("send frame data is not completed\n");
     }
     #endif
-    free (frame_data);
   }
 }
 
