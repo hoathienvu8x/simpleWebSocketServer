@@ -4,7 +4,7 @@
 #include <math.h>
 #include <sys/timerfd.h>
 
-#define MAX_WS_PAD (BUFFER_SIZE - 10)
+#define MAX_WS_PAD (BUFFER_SIZE - 11)
 
 static int handle_verify (ws_client * client);
 static int closesocket(int fd) {
@@ -13,7 +13,6 @@ static int closesocket(int fd) {
 }
 static int create_and_bind (const char *port)
 {
-
   struct addrinfo hints;
   struct addrinfo *result, *rp;
   int s, sfd, on = 1;
@@ -64,7 +63,6 @@ static int create_and_bind (const char *port)
 
 int setNonblocking (int sfd)
 {
-
   int flags, s;
 
   flags = fcntl (sfd, F_GETFL, 0);
@@ -116,6 +114,42 @@ static int my_epoll_delete(int epoll_fd, int fd)
   return 0;
 }
 
+static ssize_t ws_client_restrict_read(ws_client *cli, void *buf, size_t len) {
+  size_t i;
+  ssize_t n;
+  char *p = buf;
+  for (i = 0; i < len;) {
+    if (cli->buf.pos == 0 || cli->buf.pos == cli->buf.len) {
+      memset(cli->buf.data, 0, sizeof(cli->buf.data));
+      n = recv(cli->fd, cli->buf.data, sizeof(cli->buf.data), 0);
+      if (n <= 0) {
+        if (n < 0 && (errno == EWOULDBLOCK || errno == EAGAIN)) continue;
+        return n;
+      }
+      cli->buf.pos = 0;
+      cli->buf.len = (size_t)n;
+    }
+    *(p++) = cli->buf.data[cli->buf.pos++];
+    i++;
+  }
+  return (ssize_t)i;
+}
+
+static int ws_client_restrict_write(int fd, const void *buf, size_t len) {
+  size_t left = len;
+  const char *buf2 = buf;
+  int rc = 0;
+  do {
+    rc = send(fd, buf2, left, MSG_NOSIGNAL);
+    if (rc < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) continue;
+    if (rc <= 0) break;
+    buf2 += rc;
+    left -= (size_t)rc;
+  } while ((errno == EAGAIN || errno == EWOULDBLOCK) && left > 0);
+  if (left != 0) return -1;
+  return (int)len;
+}
+
 void *create_client (int fd, ws_server * server)
 {
   if (!server) return NULL;
@@ -129,10 +163,7 @@ void *create_client (int fd, ws_server * server)
     }
   }
   ws_client *client = &server->clients[fd];
-  client->data = (char *) malloc (sizeof (char) * BUFFER_SIZE + 1);
-  client->size = BUFFER_SIZE;
-  client->data[client->size] = '\0';
-  client->assgined = 0;
+  memset(&client->buf, 0, sizeof(client->buf));
   client->state = 0;
   client->fd = fd;
   client->server = server;
@@ -145,7 +176,6 @@ void close_client (ws_client * client)
     ws_server *server = client->server;
     my_epoll_delete(server->epollfd, client->fd);
     closesocket (client->fd);
-    free (client->data);
     if (client->fd < server->max_fd) {
       server->clients[client->fd] = (struct client) { 0 };      // delete the client
     }
@@ -155,31 +185,6 @@ void close_client (ws_client * client)
 void get_frame (ws_client * client)
 {
   if (!client) return;
-  char buffer[BUFFER_SIZE];
-  int read_size = read (client->fd, buffer, BUFFER_SIZE);
-  if (read_size <= 0) {
-    if (read_size < 0 && (errno == EWOULDBLOCK || errno == EAGAIN)) {
-      return;
-    }
-    close_client (client);
-    return;
-  }
-  if (read_size > client->size - client->assgined) {
-    //reallocate the client's buffer
-    client->data =
-      (char *) realloc (client->data, client->size + read_size * 2 + 1);
-    if (client->data) {
-      client->size = client->size + read_size * 2;
-      client->data[client->size] = '\0';
-    } else {
-      return;
-    }
-
-  }
-  int offset = client->assgined;
-  char *copy_str = client->data + offset;
-  memcpy (copy_str, buffer, read_size);
-  client->assgined += read_size;
 
   if (!client->state) {
     int result = handle_verify (client);
@@ -190,62 +195,83 @@ void get_frame (ws_client * client)
     if (client->server->onopen)
       client->server->onopen(client);
   }
-  //get websocket frame
-  if (client->data && client->state == 1) {
-    int idx = 2;
-    char byte_one = client->data[0];
-    uint opcode = byte_one & 0x0f;
-    char byte_two = client->data[1];
-    int mask = byte_two & 0x80;
-    uint64_t len = byte_two & 0x7f;
+  if (client->state != 1) return;
+  char *payload = NULL;
+  uint64_t recv_len = 0;
+  for (;;) {
+    char frame_header[2] = {0}, hdr[10] = {0}, mask_bytes[4] = {0};
+    if (ws_client_restrict_read(client, frame_header, 2) < 2) {
+      close_client(client);
+      return;
+    }
+    uint opcode = frame_header[0] & 0x0f;
     if (opcode > 125) {
-      if (client->assgined < 8) {
-        close_client (client);
+      close_client(client);
+      return;
+    }
+    uint64_t len = frame_header[1] & 0x7f;
+    if (len == 126) {
+      if (ws_client_restrict_read(client, hdr, 2) < 2) {
+        close_client(client);
+        return;
+      }
+      len = (((uint64_t)hdr[0]) << 8 | hdr[1]);
+    } else if (len == 127) {
+      if (ws_client_restrict_read(client, hdr, 8) < 8) {
+        close_client(client);
+        return;
+      }
+      len = (
+        (((uint64_t)hdr[0]) << 56) |
+        (((uint64_t)hdr[1]) << 48) |
+        (((uint64_t)hdr[2]) << 40) |
+        (((uint64_t)hdr[3]) << 32) |
+        (((uint64_t)hdr[4]) << 24) |
+        (((uint64_t)hdr[5]) << 16) |
+        (((uint64_t)hdr[6]) << 8) |
+        (uint64_t)hdr[7]
+      );
+    }
+    printf("len = %lld\n", (long long)len);
+    if (frame_header[1] & 0x80) {
+      if (ws_client_restrict_read(client, mask_bytes, 4) < 4) {
+        close_client(client);
         return;
       }
     }
-    if (len == 126) {
-      len = ((((uint64_t)client->data[2])) << 8 | client->data[3]);
-      idx += 2;
-    } else if (len == 127) {
-      len = (
-        (((uint64_t)client->data[2]) << 56) |
-        (((uint64_t)client->data[3]) << 48) |
-        (((uint64_t)client->data[4]) << 40) |
-        (((uint64_t)client->data[5]) << 32) |
-        (((uint64_t)client->data[6]) << 24) |
-        (((uint64_t)client->data[7]) << 16) |
-        (((uint64_t)client->data[8]) << 8) |
-        (uint64_t)client->data[9]
-      );
-      idx += 8;
-
-    }
-    if ((uint64_t)client->assgined < idx + 4 + len) {
+    char *tmp = realloc(payload, recv_len + len + 1);
+    if (!tmp) {
+      close_client(client);
       return;
     }
-    char *payload = NULL;
-    if (mask) {
-      char mask_bytes[4];
-      memcpy (mask_bytes, client->data + idx, 4);
-      idx += 4;
-      payload = unmask (mask_bytes, client->data + idx, len);        //get payload to handle_all_frame and end  have to destory the memory area
-    } else {
-      payload = client->data + idx;
-    }
-    memset (client->data, '0', idx + len);      //
-    char *remain = client->data + idx + len;
-    client->assgined = client->assgined - idx - len;
-    memcpy (client->data, remain, client->assgined);
-
-    //construct ws frame
-    ws_frame *frame = (ws_frame *) malloc (sizeof (ws_frame));
-    if (!frame)
+    payload = tmp;
+    printf("payload = %s\n", payload);
+    if ((uint64_t)ws_client_restrict_read(client, payload + recv_len, len) < len) {
+      free(payload);
+      close_client(client);
       return;
-    frame->opcode = opcode;
-    frame->payload = payload;
-    frame->payload_len = len;
-    handle_all_frame (client, frame);
+    }
+    if (frame_header[1] & 0x80) {
+      tmp = payload + recv_len;
+      uint64_t i;
+      for (i = 0; i < len; i++) {
+        tmp[i] = tmp[i] ^ mask_bytes[i % 4];
+      }
+    }
+    recv_len += len;
+    if (opcode != 0) {
+      ws_frame *frame = (ws_frame *) malloc (sizeof (ws_frame));
+      if (!frame) {
+        free(payload);
+        return;
+      }
+      *(payload + recv_len) = '\0';
+      frame->opcode = opcode;
+      frame->payload = payload;
+      frame->payload_len = recv_len;
+      handle_all_frame (client, frame);
+      break;
+    }
   }
 }
 
@@ -257,12 +283,20 @@ static int handle_verify (ws_client * client)
   if (client->state) return 0;
   //get all http request data and then parse it
   //split the request and then get the  header "sec-websocket-key" and the get the value
-
-  char *http_header = strstr (client->data, "\r\n\r\n");
-  if (!http_header) return -1;
-  if (strncasecmp(client->data, "GET ", 4) != 0) return -1;
+  char buf[BUFFER_SIZE] = {0};
+  int rc, blen = 0;
+  do {
+    rc = ws_client_restrict_read(client, buf + blen, 1);
+    if (rc < 0) return -1;
+    blen += rc;
+    if (strstr(buf, "\r\n\r\n")) break;
+    if (blen >= BUFFER_SIZE) return -1;
+  } while (strstr(buf, "\r\n\r\n") == NULL && rc > 0);
+  if (strstr(buf, "\r\n\r\n") == NULL) return -1;
+  buf[blen] = '\0';
+  if (strncasecmp(buf, "GET ", 4) != 0) return -1;
   char *start = NULL;
-  start = strstr (client->data, "Sec-WebSocket-Key");
+  start = strstr (buf, "Sec-WebSocket-Key");
   if (!start) return -1;
   char *end = strstr (start, "\r\n");
   char sec[255] = { 0 };
@@ -284,27 +318,8 @@ static int handle_verify (ws_client * client)
     return -1;
   }
   free (key);
-  char *buf2 = msg;
   size_t slen = strlen(msg);
-  int retval = 0;
-  do {
-    retval = write (client->fd, buf2, slen);
-    if (retval < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) continue;
-    if (retval == 0) {
-      break;
-    }
-    buf2 += retval;
-    slen -= (size_t)retval;
-  } while ((errno == EAGAIN || errno == EWOULDBLOCK) && slen > 0);
-
-  if (slen != 0) return -1;
-
-  int http_header_len = http_header - client->data + 4;
-  //copy the remain data
-  memset (client->data, '0', http_header_len);    //
-  char *remain = client->data + http_header_len;
-  client->assgined = client->assgined - http_header_len;
-  memcpy (client->data, remain, client->assgined);
+  if (ws_client_restrict_write(client->fd, msg, slen) != (ssize_t)slen) return -1;
   client->state = 1;
   return 0;
 }
@@ -313,10 +328,9 @@ void send_frame (
   ws_client * client, int opcode, char *payload, int payload_size
 ) {
   if (!client) return;
-  int i, retval = 0;
+  int i;
   int frame_count = ceil((float)payload_size / (float)MAX_WS_PAD);
   if (frame_count == 0) frame_count = 1;
-  char *buf2 = NULL;
   char frame_data[BUFFER_SIZE] = {0};
   for (i = 0; i < frame_count; i++) {
     int frame_size = i != frame_count - 1 ? MAX_WS_PAD : payload_size % MAX_WS_PAD;
@@ -352,18 +366,13 @@ void send_frame (
       frame_length += 10;
     }
     frame_data[frame_length] = '\0';
-    buf2 = frame_data;
-    do {
-      retval = write (client->fd, buf2, frame_length);
-      if (retval < 0 && (errno != EAGAIN && errno != EWOULDBLOCK)) break;
-      frame_length -= retval;
-      buf2 += retval;
-    } while ((errno == EAGAIN || errno == EWOULDBLOCK) && frame_length > 0);
-    #ifndef NDEBUG
-    if (frame_length > 0) {
-      printf("send frame data is not completed\n");
+    if (ws_client_restrict_write(client->fd, frame_data, frame_length) != frame_length) {
+      #ifndef NDEBUG
+      if (frame_length > 0) {
+        printf("send frame data is not completed\n");
+      }
+      #endif
     }
-    #endif
   }
 }
 
@@ -451,20 +460,6 @@ void handle_close (ws_client * client, int code, char *reason)
     client->server->onclose(client);
   close_client (client);
 }
-
-char *unmask (char *mask_bytes, char *buffer, int buffer_size)
-{
-  char *payload = (char *) malloc (sizeof (char) * buffer_size + 1);
-  int mod = 0;
-  int i;
-  for (i = 0; i < buffer_size; i++) {
-    mod = i % 4;
-    payload[i] = mask_bytes[mod] ^ buffer[i];
-  }
-  payload[buffer_size] = '\0';
-  return payload;
-}
-
 
 void event_loop (ws_server * server)
 {

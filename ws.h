@@ -30,11 +30,15 @@ enum opcode {
 typedef struct client ws_client;
 typedef struct server ws_server;
 
+struct ringbuf_t {
+  char data[BUFFER_SIZE];
+  size_t pos;
+  size_t len;
+};
+
 struct client {
   int fd;
-  char *data;
-  int size;
-  int assgined;
+  struct ringbuf_t buf;
   int state;
   ws_server *server;
 };
@@ -57,7 +61,6 @@ struct server {
   void (*onmessage)(ws_client *, int, const char *, size_t);
 };
 
-char *unmask (char *mask_bytes, char *buffer, int buffer_size);
 void handle_all_frame (ws_client * client, ws_frame * frame);
 void handle_ping (ws_client * client);
 void handle_data (ws_client * client, char *data, int data_size);
