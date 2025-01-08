@@ -2,6 +2,7 @@
 #include <unistd.h>
 #include <errno.h>
 #include <math.h>
+#include <endian.h>
 #include <sys/timerfd.h>
 
 #define MAX_WS_PAD (BUFFER_SIZE - 11)
@@ -124,7 +125,7 @@ static ssize_t ws_client_restrict_read(ws_client *cli, void *buf, size_t len) {
       n = recv(cli->fd, cli->buf.data, sizeof(cli->buf.data), 0);
       if (n <= 0) {
         if (n < 0 && (errno == EWOULDBLOCK || errno == EAGAIN)) continue;
-        return n;
+        return -1;
       }
       cli->buf.pos = 0;
       cli->buf.len = (size_t)n;
@@ -199,80 +200,75 @@ void get_frame (ws_client * client)
   char *payload = NULL;
   uint64_t recv_len = 0;
   for (;;) {
-    char frame_header[2] = {0}, hdr[10] = {0}, mask_bytes[4] = {0};
-    if (ws_client_restrict_read(client, frame_header, 2) < 2) {
+    uint8_t data[10] = {0};
+    if (ws_client_restrict_read(client, data, 2) < 2) {
       close_client(client);
-      return;
+      goto clean_up;
     }
-    uint opcode = frame_header[0] & 0x0f;
-    if (opcode > 125) {
-      close_client(client);
-      return;
-    }
-    uint64_t len = frame_header[1] & 0x7f;
-    if (len == 126) {
-      if (ws_client_restrict_read(client, hdr, 2) < 2) {
+
+    uint8_t opcode = data[0] & 15;
+    int beg = opcode != 0x0;
+    int fin = data[0] >> 7;
+    int mask = data[1] >> 7;
+    uint8_t mask_key[4] = {0};
+
+    uint64_t pl_len = data[1] & 127;
+
+    if (pl_len == 126) {
+      memset(data, 0, sizeof(data));
+      if (ws_client_restrict_read(client, data, 2) < 2) {
         close_client(client);
-        return;
+        goto clean_up;
       }
-      len = (((uint64_t)hdr[0]) << 8 | hdr[1]);
-    } else if (len == 127) {
-      if (ws_client_restrict_read(client, hdr, 8) < 8) {
+      pl_len = be16toh(*(uint16_t*)data);
+    } else if (pl_len == 127) {
+      memset(data, 0, sizeof(data));
+      if (ws_client_restrict_read(client, data, 8) < 8) {
         close_client(client);
-        return;
+        goto clean_up;
       }
-      len = (
-        (((uint64_t)hdr[0]) << 56) |
-        (((uint64_t)hdr[1]) << 48) |
-        (((uint64_t)hdr[2]) << 40) |
-        (((uint64_t)hdr[3]) << 32) |
-        (((uint64_t)hdr[4]) << 24) |
-        (((uint64_t)hdr[5]) << 16) |
-        (((uint64_t)hdr[6]) << 8) |
-        (uint64_t)hdr[7]
-      );
+      pl_len = be64toh(*(uint64_t*)data) & ~(1ULL << 63);
     }
-    printf("len = %lld\n", (long long)len);
-    if (frame_header[1] & 0x80) {
-      if (ws_client_restrict_read(client, mask_bytes, 4) < 4) {
+    if (mask) {
+      memset(data, 0, sizeof(data));
+      if (ws_client_restrict_read(client, data, 4) < 4) {
         close_client(client);
-        return;
+        goto clean_up;
       }
+      *(uint32_t*)mask_key = *(uint32_t*)data;
     }
-    char *tmp = realloc(payload, recv_len + len + 1);
+    char *tmp = realloc(payload, recv_len + pl_len + 1);
     if (!tmp) {
       close_client(client);
-      return;
+      goto clean_up;
     }
     payload = tmp;
-    printf("payload = %s\n", payload);
-    if ((uint64_t)ws_client_restrict_read(client, payload + recv_len, len) < len) {
-      free(payload);
+    if (ws_client_restrict_read(client, payload + recv_len, pl_len) <= 0) {
       close_client(client);
-      return;
+      goto clean_up;
     }
-    if (frame_header[1] & 0x80) {
-      tmp = payload + recv_len;
-      uint64_t i;
-      for (i = 0; i < len; i++) {
-        tmp[i] = tmp[i] ^ mask_bytes[i % 4];
+    if (mask) {
+      uint64_t i = 0;
+      char *p = payload + recv_len;
+      for (i = 0; i < pl_len; i++) {
+        p[i] = p[i] ^ mask_key[i & 3];
       }
     }
-    recv_len += len;
-    if (opcode != 0) {
-      ws_frame *frame = (ws_frame *) malloc (sizeof (ws_frame));
-      if (!frame) {
-        free(payload);
-        return;
-      }
+    recv_len += pl_len;
+    if (fin && beg) {
+      ws_frame *frame = (ws_frame *)malloc(sizeof(ws_frame));
+      if (!frame) goto clean_up;
       *(payload + recv_len) = '\0';
       frame->opcode = opcode;
       frame->payload = payload;
       frame->payload_len = recv_len;
-      handle_all_frame (client, frame);
+      handle_all_frame(client, frame);
       break;
     }
   }
+  return;
+clean_up:
+  if (payload) free(payload);
 }
 
 
