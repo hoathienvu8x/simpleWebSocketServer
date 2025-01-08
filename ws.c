@@ -7,16 +7,15 @@
 
 #define MAX_WS_PAD (BUFFER_SIZE - 11)
 
-static int handle_verify (ws_client * client);
 static int closesocket(int fd) {
   shutdown(fd, SHUT_RDWR);
   return close(fd);
 }
-static int create_and_bind (const char *port)
-{
+static int create_and_bind (const char *port) {
   struct addrinfo hints;
   struct addrinfo *result, *rp;
   int s, sfd, on = 1;
+
   memset (&hints, 0, sizeof (struct addrinfo));
   hints.ai_family = AF_UNSPEC;  /* Return IPv4 and IPv6 choices */
   hints.ai_socktype = SOCK_STREAM;      /* We want a TCP socket */
@@ -62,21 +61,15 @@ static int create_and_bind (const char *port)
   return sfd;
 }
 
-int setNonblocking (int sfd)
-{
-  int flags, s;
-
-  flags = fcntl (sfd, F_GETFL, 0);
+static int setNonblocking (int sfd) {
+  int flags = fcntl (sfd, F_GETFL, 0);
   if (flags == -1) {
     #ifndef NDEBUG
     perror ("fcntl");
     #endif
     return -1;
   }
-
-  flags |= O_NONBLOCK;
-  s = fcntl (sfd, F_SETFL, flags);
-  if (s == -1) {
+  if (fcntl (sfd, F_SETFL, flags | O_NONBLOCK) == -1) {
     #ifndef NDEBUG
     perror ("fcntl");
     #endif
@@ -86,8 +79,7 @@ int setNonblocking (int sfd)
   return 0;
 }
 
-static int my_epoll_add(int epoll_fd, int fd, uint32_t events)
-{
+static int my_epoll_add(int epoll_fd, int fd, uint32_t events) {
   struct epoll_event event;
 
   /* Shut the valgrind up! */
@@ -104,8 +96,7 @@ static int my_epoll_add(int epoll_fd, int fd, uint32_t events)
   return 0;
 }
 
-static int my_epoll_delete(int epoll_fd, int fd)
-{
+static int my_epoll_delete(int epoll_fd, int fd) {
   if (epoll_ctl(epoll_fd, EPOLL_CTL_DEL, fd, NULL) < 0) {
     #ifndef NDEBUG
     perror("my_epoll_delete(): ");
@@ -151,8 +142,7 @@ static int ws_client_restrict_write(int fd, const void *buf, size_t len) {
   return (int)len;
 }
 
-void *create_client (int fd, ws_server * server)
-{
+static void *create_client (int fd, ws_server * server) {
   if (!server) return NULL;
   if (server->max_fd < fd) {
     //server->clients = realloc(server->client);
@@ -171,8 +161,7 @@ void *create_client (int fd, ws_server * server)
   return client;
 }
 
-void close_client (ws_client * client)
-{
+static void close_client (ws_client * client) {
   if (client != NULL) {
     ws_server *server = client->server;
     my_epoll_delete(server->epollfd, client->fd);
@@ -183,7 +172,181 @@ void close_client (ws_client * client)
   }
 }
 
-void get_frame (ws_client * client)
+static int handle_verify (ws_client * client) {
+  if (!client) return -1;
+  if (client->state) return 0;
+  //get all http request data and then parse it
+  //split the request and then get the  header "sec-websocket-key" and the get the value
+  char buf[BUFFER_SIZE] = {0};
+  int rc, blen = 0;
+  do {
+    rc = ws_client_restrict_read(client, buf + blen, 1);
+    if (rc < 0) return -1;
+    blen += rc;
+    if (strstr(buf, "\r\n\r\n")) break;
+    if (blen >= BUFFER_SIZE) return -1;
+  } while (strstr(buf, "\r\n\r\n") == NULL && rc > 0);
+  if (strstr(buf, "\r\n\r\n") == NULL) return -1;
+  buf[blen] = '\0';
+  if (strncasecmp(buf, "GET ", 4) != 0) return -1;
+  char *start = NULL;
+  start = strstr (buf, "Sec-WebSocket-Key");
+  if (!start) return -1;
+  char *end = strstr (start, "\r\n");
+  char sec[255] = { 0 };
+  strncpy (sec, start, end - start);
+
+  static char *const_key = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+  char secure_key[255] = { 0 };
+  char *key = strstr (sec, ":") + 2;
+  sprintf (secure_key, "%s%s", key, const_key);
+  key = get_socket_secure_key ((const unsigned char *)secure_key);
+  if (!key) return -1;
+  char *res_header_str =
+    "HTTP/1.1 101 Web Socket Protocol Handshake\r\nUpgrade: "
+    "WebSocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: %s%s";
+  char *double_newline = "\r\n\r\n";;
+  char msg[255] = { 0 };
+  if (sprintf (msg, res_header_str, key, double_newline) <= 0) {
+    return -1;
+  }
+  free (key);
+  size_t slen = strlen(msg);
+  if (ws_client_restrict_write(client->fd, msg, slen) != (ssize_t)slen) {
+    return -1;
+  }
+  client->state = 1;
+  return 0;
+}
+
+static void send_frame (
+  ws_client * client, int opcode, const char *payload, size_t payload_size
+) {
+  if (!client || !payload || payload_size == 0) return;
+  int i;
+  int frame_count = ceil((float)payload_size / (float)MAX_WS_PAD);
+  if (frame_count == 0) frame_count = 1;
+  char frame_data[BUFFER_SIZE] = {0};
+  for (i = 0; i < frame_count; i++) {
+    int frame_size = i != frame_count - 1 ? MAX_WS_PAD : payload_size % MAX_WS_PAD;
+    char op_code = i != 0 ? 0x0 : 0x80 | opcode;
+    char fin = i != frame_count - 1 ? 0x0 : 0x1;
+    memset(frame_data, 0, sizeof(frame_data));
+    int frame_length = frame_size;
+    if (frame_size < 126) {
+      frame_data[0] = fin | op_code;
+      frame_data[1] = frame_size;
+      memcpy (frame_data + 2, &payload[i * MAX_WS_PAD], frame_size);
+      frame_length += 2;
+    } else if (frame_size == 126) {
+      frame_data[0] = fin | op_code;
+      frame_data[1] = frame_size;
+      char *payload_size_extra = (char *) &frame_size;
+      frame_data[2] = payload_size_extra[0];
+      frame_data[3] = payload_size_extra[1];
+      memcpy (frame_data + 4, &payload[i * MAX_WS_PAD], frame_size);
+      frame_length += 4;
+    } else {
+      frame_data[0] = fin | op_code;
+      frame_data[1] = 127;
+      frame_data[2] = (0 >> 24) & 0xFF;
+      frame_data[3] = (0 >> 16) & 0xFF;
+      frame_data[4] = (0 >> 8) & 0xFF;
+      frame_data[5] = 0 & 0xFF;
+      frame_data[6] = (frame_size >> 24) & 0xFF;
+      frame_data[7] = (frame_size >> 16) & 0xFF;
+      frame_data[8] = (frame_size >> 8) & 0xFF;
+      frame_data[9] = frame_size & 0xFF;
+      memcpy (frame_data + 10, &payload[i * MAX_WS_PAD], frame_size);
+      frame_length += 10;
+    }
+    frame_data[frame_length] = '\0';
+    if (ws_client_restrict_write(client->fd, frame_data, frame_length) != frame_length) {
+      #ifndef NDEBUG
+      if (frame_length > 0) {
+        printf("send frame data is not completed\n");
+      }
+      #endif
+    }
+  }
+}
+
+static void handle_ping (ws_client * client)
+{
+  if (!client) return;
+//handler ping data send pong
+  char *payload = "pong pong";
+  enum opcode enum_opcode = PONG;
+  send_frame (client, enum_opcode, payload, strlen (payload));
+}
+
+static void handle_close (ws_client * client, int code, const char *reason)
+{
+  if (!client) return;
+  //handle the close
+  int reason_size = reason ? strlen (reason) : 0;
+  enum opcode close_opcode = CLOSE;
+  int payload_size = reason_size + 2;
+  char *payload = (char *) malloc (sizeof (char) * payload_size);
+  if (!payload)
+    return;
+  payload[0] = (code >> 24) & 0xFF;
+  payload[1] = (code >> 16) & 0xFF;
+  if (reason)
+    memcpy (payload, reason, 2);
+  send_frame (client, close_opcode, payload, payload_size);
+  // remove the fd in epoll event set and close the socket
+  free (payload);
+  if (client->server->onclose)
+    client->server->onclose(client);
+  close_client (client);
+}
+
+static void handle_all_frame (ws_client * client, ws_frame * frame)
+{
+  if (frame == NULL || client == NULL) {
+    return;
+  }
+  //handle the ws_frame
+  enum opcode enum_opcode = (enum opcode) frame->opcode;
+  switch (enum_opcode) {
+  case TEXT: case BINARY: {
+      //handle_text(client,frame->payload,strlen(frame->payload));
+      //broadcast (client->server, frame->payload);
+      if (client->server->onmessage)
+        client->server->onmessage(
+          client, frame->opcode, frame->payload, frame->payload_len
+        );
+    } break;
+  case CLOSE: {
+      char *reason = NULL;
+      if (strlen (frame->payload) > 2) {
+        reason = &frame->payload[2];
+      }
+      short close_code = (short) *(frame->payload);
+      handle_close (client, close_code, reason);
+    } break;
+  case PING: {
+    if (client->server->onping)
+      client->server->onping(client);
+    else
+      handle_ping (client);
+    } break;
+  case PONG: {
+      if (client->server->onpong)
+        client->server->onpong(client);
+    } break;
+  default:
+    handle_close (client, 1002, "unknown opcode");
+  }
+  if (frame) {
+    //case the opcode and then execute specify  opcode-handler
+    free (frame->payload);
+    free (frame);
+  }
+}
+
+static void get_frame (ws_client * client)
 {
   if (!client) return;
 
@@ -207,7 +370,7 @@ void get_frame (ws_client * client)
     }
 
     uint8_t opcode = data[0] & 15;
-    int beg = opcode != 0x0;
+    int beg = opcode != CONT;
     int fin = data[0] >> 7;
     int mask = data[1] >> 7;
     uint8_t mask_key[4] = {0};
@@ -271,200 +434,14 @@ clean_up:
   if (payload) free(payload);
 }
 
-
-/*verify the http handshark and then hjack to websocket else close the client*/
-static int handle_verify (ws_client * client)
-{
-  if (!client) return -1;
-  if (client->state) return 0;
-  //get all http request data and then parse it
-  //split the request and then get the  header "sec-websocket-key" and the get the value
-  char buf[BUFFER_SIZE] = {0};
-  int rc, blen = 0;
-  do {
-    rc = ws_client_restrict_read(client, buf + blen, 1);
-    if (rc < 0) return -1;
-    blen += rc;
-    if (strstr(buf, "\r\n\r\n")) break;
-    if (blen >= BUFFER_SIZE) return -1;
-  } while (strstr(buf, "\r\n\r\n") == NULL && rc > 0);
-  if (strstr(buf, "\r\n\r\n") == NULL) return -1;
-  buf[blen] = '\0';
-  if (strncasecmp(buf, "GET ", 4) != 0) return -1;
-  char *start = NULL;
-  start = strstr (buf, "Sec-WebSocket-Key");
-  if (!start) return -1;
-  char *end = strstr (start, "\r\n");
-  char sec[255] = { 0 };
-  strncpy (sec, start, end - start);
-
-  static char *const_key = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
-  char secure_key[255] = { 0 };
-  char *key = strstr (sec, ":") + 2;
-  sprintf (secure_key, "%s%s", key, const_key);
-  key = get_socket_secure_key ((const unsigned char *)secure_key);
-  if (!key)
-    return -1;
-  char *res_header_str =
-    "HTTP/1.1 101 Web Socket Protocol Handshake\r\nUpgrade: "
-    "WebSocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: %s%s";
-  char *double_newline = "\r\n\r\n";;
-  char msg[255] = { 0 };
-  if (sprintf (msg, res_header_str, key, double_newline) <= 0) {
-    return -1;
-  }
-  free (key);
-  size_t slen = strlen(msg);
-  if (ws_client_restrict_write(client->fd, msg, slen) != (ssize_t)slen) return -1;
-  client->state = 1;
-  return 0;
-}
-
-void send_frame (
-  ws_client * client, int opcode, char *payload, int payload_size
-) {
-  if (!client) return;
-  int i;
-  int frame_count = ceil((float)payload_size / (float)MAX_WS_PAD);
-  if (frame_count == 0) frame_count = 1;
-  char frame_data[BUFFER_SIZE] = {0};
-  for (i = 0; i < frame_count; i++) {
-    int frame_size = i != frame_count - 1 ? MAX_WS_PAD : payload_size % MAX_WS_PAD;
-    char op_code = i != 0 ? 0x0 : 0x80 | opcode;
-    char fin = i != frame_count - 1 ? 0x0 : 0x1;
-    memset(frame_data, 0, sizeof(frame_data));
-    int frame_length = frame_size;
-    if (frame_size < 126) {
-      frame_data[0] = fin | op_code;
-      frame_data[1] = frame_size;
-      memcpy (frame_data + 2, &payload[i * MAX_WS_PAD], frame_size);
-      frame_length += 2;
-    } else if (frame_size == 126) {
-      frame_data[0] = fin | op_code;
-      frame_data[1] = frame_size;
-      char *payload_size_extra = (char *) &frame_size;
-      frame_data[2] = payload_size_extra[0];
-      frame_data[3] = payload_size_extra[1];
-      memcpy (frame_data + 4, &payload[i * MAX_WS_PAD], frame_size);
-      frame_length += 4;
-    } else {
-      frame_data[0] = fin | op_code;
-      frame_data[1] = 127;
-      frame_data[2] = (0 >> 24) & 0xFF;
-      frame_data[3] = (0 >> 16) & 0xFF;
-      frame_data[4] = (0 >> 8) & 0xFF;
-      frame_data[5] = 0 & 0xFF;
-      frame_data[6] = (frame_size >> 24) & 0xFF;
-      frame_data[7] = (frame_size >> 16) & 0xFF;
-      frame_data[8] = (frame_size >> 8) & 0xFF;
-      frame_data[9] = frame_size & 0xFF;
-      memcpy (frame_data + 10, &payload[i * MAX_WS_PAD], frame_size);
-      frame_length += 10;
-    }
-    frame_data[frame_length] = '\0';
-    if (ws_client_restrict_write(client->fd, frame_data, frame_length) != frame_length) {
-      #ifndef NDEBUG
-      if (frame_length > 0) {
-        printf("send frame data is not completed\n");
-      }
-      #endif
-    }
-  }
-}
-
-void handle_all_frame (ws_client * client, ws_frame * frame)
-{
-  if (frame == NULL || client == NULL) {
-    return;
-  }
-  //handle the ws_frame
-  enum opcode enum_opcode = (enum opcode) frame->opcode;
-  switch (enum_opcode) {
-  case TEXT: {
-      //handle_text(client,frame->payload,strlen(frame->payload));
-      //broadcast (client->server, frame->payload);
-      if (client->server->onmessage)
-        client->server->onmessage(
-          client, frame->opcode, frame->payload, frame->payload_len
-        );
-    } break;
-  case BINARY:
-    break;
-  case CLOSE: {
-      char *reason = NULL;
-      if (strlen (frame->payload) > 2) {
-        reason = &frame->payload[2];
-      }
-      short close_code = (short) *(frame->payload);
-      handle_close (client, close_code, reason);
-    } break;
-  case PING: {
-    if (client->server->onping)
-      client->server->onping(client);
-    else
-      handle_ping (client);
-    } break;
-  case PONG: {
-      if (client->server->onpong)
-        client->server->onpong(client);
-    } break;
-  default:
-    handle_close (client, 1002, "unknown opcode");
-  }
-  if (frame) {
-    //case the opcode and then execute specify  opcode-handler
-    free (frame->payload);
-    free (frame);
-  }
-}
-
-void handle_text (ws_client * client, char *payload, int payload_size)
-{
-  if (!client) return;
-//handler the raw data
-  enum opcode enum_opcode = TEXT;
-  send_frame (client, enum_opcode, payload, payload_size);
-}
-
-void handle_ping (ws_client * client)
-{
-  if (!client) return;
-//handler ping data send pong
-  char *payload = "pong pong";
-  enum opcode enum_opcode = PONG;
-  send_frame (client, enum_opcode, payload, strlen (payload));
-}
-
-void handle_close (ws_client * client, int code, char *reason)
-{
-  if (!client) return;
-  //handle the close
-  int reason_size = reason ? strlen (reason) : 0;
-  enum opcode close_opcode = CLOSE;
-  int payload_size = reason_size + 2;
-  char *payload = (char *) malloc (sizeof (char) * payload_size);
-  if (!payload)
-    return;
-  payload[0] = (code >> 24) & 0xFF;
-  payload[1] = (code >> 16) & 0xFF;
-  if (reason)
-    memcpy (payload, reason, 2);
-  send_frame (client, close_opcode, payload, payload_size);
-  // remove the fd in epoll event set and close the socket
-  free (payload);
-  if (client->server->onclose)
-    client->server->onclose(client);
-  close_client (client);
-}
-
-void event_loop (ws_server * server)
+void ws_event_loop (ws_server * server)
 {
   /* Code to set up listening socket, 'listen_sock',
      (socket(), bind(), listen()) omitted */
   int conn_sock, nfds;
   struct sockaddr_in servaddr;
   socklen_t addrlen = sizeof(servaddr);
-  if (server->timeout > 0) {
+  if (server->timeout > 0 && server->onperodic) {
     int time_fd = timerfd_create(CLOCK_MONOTONIC, 0);
     if (time_fd > 0) {
       if (my_epoll_add(server->epollfd, time_fd, EPOLLIN | EPOLLET) < 0) {
@@ -548,7 +525,7 @@ void event_loop (ws_server * server)
   }
 }
 
-ws_server *create_server (const char *port)
+ws_server *ws_event_create_server (const char *port)
 {
   int s;
   int listen_sock = create_and_bind (port);
@@ -596,6 +573,7 @@ ws_server *create_server (const char *port)
   server->onping = NULL;
   server->onpong = NULL;
   server->onperodic = NULL;
+
   return server;
 
 clean_up:
@@ -606,19 +584,38 @@ clean_up:
   return NULL;
 }
 
-void broadcast (ws_server *server, char *msg)
+void ws_send_broadcast (ws_client *cli, const char *msg)
 {
-  if (!server || !msg || strlen(msg) == 0) return;
-  int msg_len = strlen (msg);
+  ws_send_bytes_broadcast(cli, msg, msg ? strlen(msg) : 0, TEXT);
+}
+void ws_send_bytes_broadcast (ws_client *cli, const char *msg, size_t msg_len, int op)
+{
+  if (!cli || !msg || msg_len == 0) return;
+  ws_server *server = cli->server;
+  if (!server) return;
+  int client_idx;
+  for (client_idx = 0; client_idx < server->max_fd; client_idx++) {
+    ws_client *client = &server->clients[client_idx];
+    if (client->fd == cli->fd) continue;
+    if (client != NULL && client->state != 0) {
+      send_frame(client, op, msg, msg_len);
+    }
+  }
+}
+void ws_send_all(ws_server *server, const char *msg) {
+  ws_send_bytes_all(server, msg, msg ? strlen(msg) : 0, TEXT);
+}
+void ws_send_bytes_all(ws_server *server, const char *msg, size_t msg_len, int op) {
+  if (!server || !msg || msg_len == 0) return;
   int client_idx;
   for (client_idx = 0; client_idx < server->max_fd; client_idx++) {
     ws_client *client = &server->clients[client_idx];
     if (client != NULL && client->state != 0) {
-      handle_text (client, msg, msg_len);
+      send_frame(client, op, msg, msg_len);
     }
   }
 }
-void event_loop_dispose(ws_server *server) {
+void ws_event_dispose(ws_server *server) {
   if (!server) return;
   closesocket(server->epollfd);
   closesocket(server->listen_sock);
@@ -631,7 +628,17 @@ void event_loop_dispose(ws_server *server) {
   free(server->clients);
   free(server);
 }
-void ws_server_set_timeout(ws_server *srv, unsigned int timeout) {
+void ws_event_set_timeout(ws_server *srv, unsigned int timeout) {
   if (!srv) return;
   srv->timeout = timeout;
+}
+void ws_send(ws_client *client, const char *msg) {
+  if (!client || !msg || strlen(msg) == 0) return;
+  send_frame(client, TEXT, msg, strlen(msg));
+}
+void ws_send_bytes(ws_client *client, const char *msg, size_t len, int opcode) {
+  send_frame(client, opcode, msg, len);
+}
+void ws_event_close(ws_client *client, const char *reason) {
+  handle_close(client, 1000, reason);
 }

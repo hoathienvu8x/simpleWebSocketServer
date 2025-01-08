@@ -11,7 +11,7 @@
 #include <sys/ioctl.h>
 #include "sha1.h"
 
-#define BUFFER_SIZE 4096
+#define BUFFER_SIZE 1024
 #define MAX_EVENTS 1024
 
 typedef struct frame {
@@ -21,6 +21,7 @@ typedef struct frame {
 } ws_frame;
 
 enum opcode {
+  CONT = 0,
   TEXT = 1,
   BINARY = 2,
   CLOSE = 8,
@@ -62,15 +63,18 @@ struct server {
   void (*onperodic)(ws_server *);
 };
 
-void handle_all_frame (ws_client * client, ws_frame * frame);
-void handle_ping (ws_client * client);
-void handle_data (ws_client * client, char *data, int data_size);
-void handle_close (ws_client * client, int code, char *reason);
-void handle_text (ws_client * client, char *payload, int payload_size);
-void broadcast (ws_server *server, char *msg);
-ws_server *create_server (const char *port);
-void ws_server_set_timeout(ws_server *srv, unsigned int timeout);
-void event_loop (ws_server * server);
-void event_loop_dispose(ws_server *server);
+void ws_send_broadcast (ws_client *cli, const char *msg);
+void ws_send_bytes_broadcast (ws_client *cli, const char *msg, size_t msg_len, int op);
+
+void ws_send_all(ws_server *server, const char *msg);
+void ws_send_bytes_all(ws_server *server, const char *msg, size_t msg_len, int op);
+
+void ws_send(ws_client *client, const char *msg);
+void ws_send_bytes(ws_client *client, const char *msg, size_t len, int op);
+void ws_event_close(ws_client *client, const char *reason);
+ws_server *ws_event_create_server (const char *port);
+void ws_event_set_timeout(ws_server *srv, unsigned int timeout);
+void ws_event_loop (ws_server * server);
+void ws_event_dispose(ws_server *server);
 
 #endif

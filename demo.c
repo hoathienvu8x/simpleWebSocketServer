@@ -20,11 +20,11 @@ static void ondata(ws_client *cli, int opcode, const char *data, size_t len) {
     printf("recv (%ld)\n", len);
   }
   const char *resp = "s[\"good job\"]";
-  handle_text(cli, (char *)resp, strlen(resp));
+  ws_send(cli, (char *)resp);
 }
 
 static void onperodic(ws_server *srv) {
-  broadcast(srv, "3");
+  ws_send_all(srv, "3");
 }
 
 int main (int argc, char **argv)
@@ -33,13 +33,13 @@ int main (int argc, char **argv)
   if (argc > 1) {
     port = argv[1];
   }
-  ws_server *server = create_server (port);
+  ws_server *server = ws_event_create_server (port);
   if (!server) return -1;
   server->onopen = onopen;
   server->onclose = onclose;
   server->onmessage = ondata;
   server->onperodic = onperodic;
-  event_loop (server);
-  event_loop_dispose (server);
+  ws_event_loop (server);
+  ws_event_dispose (server);
   return 0;
 }
