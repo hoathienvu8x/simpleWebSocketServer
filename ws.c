@@ -478,8 +478,6 @@ void event_loop (ws_server * server)
         if (timerfd_settime(server->time_fd, 0, &its, NULL) != 0) {
           my_epoll_delete(server->epollfd, server->time_fd);
           closesocket(server->time_fd);
-        } else {
-          printf("time_fd = %d init\n", server->time_fd);
         }
       }
     }
@@ -537,19 +535,17 @@ void event_loop (ws_server * server)
       } else if (server->events[n].data.fd == server->time_fd) {
         unsigned long long val;
         static int n_id;
-        int rcc = 0;
-        printf("%d\n", server->events[n].data.fd);
-        if ((rcc = read(server->events[n].data.fd, &val, sizeof(val))) > 0) {
+        if (read(server->events[n].data.fd, &val, sizeof(val)) > 0) {
           printf("Received timerfd event via epoll: %d\n", n_id++);
         }
-        printf("rcc = %d\n",rcc);
+        if (server->onperodic)
+          server->onperodic(server);
       } else {
         client_index = server->events[n].data.fd;
         get_frame (&server->clients[client_index]);
       }
     }
   }
-
 }
 
 ws_server *create_server (const char *port)
@@ -599,6 +595,7 @@ ws_server *create_server (const char *port)
   server->onclose = NULL;
   server->onping = NULL;
   server->onpong = NULL;
+  server->onperodic = NULL;
   return server;
 
 clean_up:

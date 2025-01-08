@@ -23,6 +23,10 @@ static void ondata(ws_client *cli, int opcode, const char *data, size_t len) {
   handle_text(cli, (char *)resp, strlen(resp));
 }
 
+static void onperodic(ws_server *srv) {
+  broadcast(srv, "3");
+}
+
 int main (int argc, char **argv)
 {
   const char *port = "8088";
@@ -34,6 +38,7 @@ int main (int argc, char **argv)
   server->onopen = onopen;
   server->onclose = onclose;
   server->onmessage = ondata;
+  server->onperodic = onperodic;
   event_loop (server);
   event_loop_dispose (server);
   return 0;

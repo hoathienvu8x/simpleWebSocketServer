@@ -59,6 +59,7 @@ struct server {
   void (*onping)(ws_client *);
   void (*onpong)(ws_client *);
   void (*onmessage)(ws_client *, int, const char *, size_t);
+  void (*onperodic)(ws_server *);
 };
 
 void handle_all_frame (ws_client * client, ws_frame * frame);
