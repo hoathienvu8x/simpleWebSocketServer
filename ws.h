@@ -9,7 +9,7 @@
 #include <string.h>
 #include <fcntl.h>
 #include <sys/ioctl.h>
-#include "sha1.h"
+#include <pthread.h>
 
 #define BUFFER_SIZE 1024
 #define MAX_EVENTS 1024
@@ -28,8 +28,8 @@ enum opcode {
   PING = 9,
   PONG = 10,
 };
-typedef struct client ws_client;
-typedef struct server ws_server;
+typedef struct _client ws_client;
+typedef struct _server ws_server;
 
 struct ringbuf_t {
   char data[BUFFER_SIZE];
@@ -37,30 +37,35 @@ struct ringbuf_t {
   size_t len;
 };
 
-struct client {
+struct _client {
   int fd;
   struct ringbuf_t buf;
   int state;
   ws_server *server;
+  pthread_mutex_t mtx_snd;
+  pthread_mutex_t mtx_sta;
 };
 
-struct server {
-  ws_client *clients;           //all of the connection client
-  int client_size;              // client scale
-  int epollfd;                  //epoll listenfd
-  int time_fd;
-  int listen_sock;
-  struct epoll_event *events;   //monitor event list
-  int event_size;               //
-  int current_event_size;
-  int max_fd;                   //current max fd
-  unsigned int timeout;
+struct ws_event_list {
   void (*onopen)(ws_client *);
   void (*onclose)(ws_client *);
   void (*onping)(ws_client *);
   void (*onpong)(ws_client *);
   void (*onmessage)(ws_client *, int, const char *, size_t);
   void (*onperodic)(ws_server *);
+};
+
+struct _server {
+  ws_client *clients;           //all of the connection client
+  int client_size;              // client scale
+  int epollfd;                  //epoll listenfd
+  int time_fd;
+  int listen_sock;
+  struct ws_event_list events;
+  int current_event_size;
+  int max_fd;                   //current max fd
+  unsigned int timeout;
+  pthread_mutex_t mtx;
 };
 
 void ws_send_broadcast (ws_client *cli, const char *msg);

@@ -1,10 +1,12 @@
-#include "ws.h"
 #include <unistd.h>
 #include <errno.h>
 #include <math.h>
 #include <endian.h>
 #include <sys/timerfd.h>
 #include <netinet/tcp.h>
+
+#include "ws.h"
+#include "sha1.h"
 
 #define MAX_WS_PAD (BUFFER_SIZE - 11)
 
@@ -153,20 +155,55 @@ static int ws_client_restrict_write(int fd, const void *buf, size_t len) {
   return (int)len;
 }
 
+static int __ws_get_client_state(ws_client* _self) {
+  int state;
+  if (!_self) return -1;
+  pthread_mutex_lock(&_self->mtx_sta);
+  state = _self->state;
+  pthread_mutex_unlock(&_self->mtx_sta);
+  return state;
+}
+
+static int __ws_set_client_state(ws_client* _self, int state) {
+  if (!_self) return -1;
+  if (state < 0 || state > 3)
+    return -1;
+  pthread_mutex_lock(&_self->mtx_sta);
+  if (_self->state != state)
+    _self->state = state;
+  pthread_mutex_unlock(&_self->mtx_sta);
+  return 0;
+}
+
 static void *create_client (int fd, ws_server * server) {
   if (!server) return NULL;
-  if (server->max_fd < fd) {
+  if (!server->clients || server->max_fd < fd) {
     //server->clients = realloc(server->client);
-    server->max_fd = fd;
+    if (server->max_fd < fd) {
+      server->max_fd = fd;
+    }
+    int slots = server->max_fd > 0 ? server->max_fd : 1;
+    pthread_mutex_lock(&server->mtx);
     server->clients =
-      (ws_client *) realloc (server->clients, fd * sizeof (ws_client));
+      (ws_client *) realloc (server->clients, slots * sizeof (ws_client));
+    pthread_mutex_unlock(&server->mtx);
     if (!server->clients) {
       exit (EXIT_FAILURE);
     }
   }
-  ws_client *client = &server->clients[fd];
+  ws_client *client = NULL;
+  pthread_mutex_lock(&server->mtx);
+  client = &server->clients[fd];
+  pthread_mutex_unlock(&server->mtx);
+
+  if (pthread_mutex_init(&client->mtx_sta, NULL))
+    return NULL;
+
+  if (pthread_mutex_init(&client->mtx_snd, NULL))
+    return NULL;
+
   memset(&client->buf, 0, sizeof(client->buf));
-  client->state = 0;
+  __ws_set_client_state(client, 0);
   client->fd = fd;
   client->server = server;
   return client;
@@ -177,8 +214,14 @@ static void close_client (ws_client * client) {
     ws_server *server = client->server;
     my_epoll_delete(server->epollfd, client->fd);
     closesocket (client->fd);
+
+    pthread_mutex_destroy(&client->mtx_sta);
+    pthread_mutex_destroy(&client->mtx_snd);
+
     if (client->fd < server->max_fd) {
-      server->clients[client->fd] = (struct client) { 0 };      // delete the client
+      pthread_mutex_lock(&server->mtx);
+      server->clients[client->fd] = (struct _client) { 0 };      // delete the client
+      pthread_mutex_unlock(&server->mtx);
     }
   }
 }
@@ -223,10 +266,13 @@ static int handle_verify (ws_client * client) {
   }
   free (key);
   size_t slen = strlen(msg);
+  pthread_mutex_lock(&client->mtx_snd);
   if (ws_client_restrict_write(client->fd, msg, slen) != (ssize_t)slen) {
+    pthread_mutex_unlock(&client->mtx_snd);
     return -1;
   }
-  client->state = 1;
+  pthread_mutex_unlock(&client->mtx_snd);
+  __ws_set_client_state(client, 1);
   return 0;
 }
 
@@ -234,6 +280,7 @@ static void send_frame (
   ws_client * client, int opcode, const char *payload, size_t payload_size
 ) {
   if (!client || !payload || payload_size == 0) return;
+  if (__ws_get_client_state(client) != 1) return;
   int i;
   int frame_count = ceil((float)payload_size / (float)MAX_WS_PAD);
   if (frame_count == 0) frame_count = 1;
@@ -272,6 +319,7 @@ static void send_frame (
       frame_length += 10;
     }
     frame_data[frame_length] = '\0';
+    pthread_mutex_lock(&client->mtx_snd);
     if (ws_client_restrict_write(client->fd, frame_data, frame_length) != frame_length) {
       #ifndef NDEBUG
       if (frame_length > 0) {
@@ -279,6 +327,7 @@ static void send_frame (
       }
       #endif
     }
+    pthread_mutex_unlock(&client->mtx_snd);
   }
 }
 
@@ -308,8 +357,8 @@ static void handle_close (ws_client * client, int code, const char *reason)
   send_frame (client, close_opcode, payload, payload_size);
   // remove the fd in epoll event set and close the socket
   free (payload);
-  if (client->server->onclose)
-    client->server->onclose(client);
+  if (client->server->events.onclose)
+    client->server->events.onclose(client);
   close_client (client);
 }
 
@@ -324,8 +373,8 @@ static void handle_all_frame (ws_client * client, ws_frame * frame)
   case TEXT: case BINARY: {
       //handle_text(client,frame->payload,strlen(frame->payload));
       //broadcast (client->server, frame->payload);
-      if (client->server->onmessage)
-        client->server->onmessage(
+      if (client->server->events.onmessage)
+        client->server->events.onmessage(
           client, frame->opcode, frame->payload, frame->payload_len
         );
     } break;
@@ -338,14 +387,14 @@ static void handle_all_frame (ws_client * client, ws_frame * frame)
       handle_close (client, close_code, reason);
     } break;
   case PING: {
-    if (client->server->onping)
-      client->server->onping(client);
+    if (client->server->events.onping)
+      client->server->events.onping(client);
     else
       handle_ping (client);
     } break;
   case PONG: {
-      if (client->server->onpong)
-        client->server->onpong(client);
+      if (client->server->events.onpong)
+        client->server->events.onpong(client);
     } break;
   default:
     handle_close (client, 1002, "unknown opcode");
@@ -357,20 +406,21 @@ static void handle_all_frame (ws_client * client, ws_frame * frame)
   }
 }
 
-static void get_frame (ws_client * client)
+static void *get_frame (void *_self)
 {
-  if (!client) return;
+  ws_client * client = (ws_client *)_self;
+  if (!client) return NULL;
 
   if (!client->state) {
     int result = handle_verify (client);
     if (result) {
       close_client(client);
-      return;
+      return NULL;
     }
-    if (client->server->onopen)
-      client->server->onopen(client);
+    if (client->server->events.onopen)
+      client->server->events.onopen(client);
   }
-  if (client->state != 1) return;
+  if (__ws_get_client_state(client) != 1) return NULL;
   char *payload = NULL;
   uint64_t recv_len = 0;
   for (;;) {
@@ -440,9 +490,17 @@ static void get_frame (ws_client * client)
       break;
     }
   }
-  return;
+  return NULL;
 clean_up:
   if (payload) free(payload);
+  return NULL;
+}
+
+static void * __ws_call_periodic(void *_self) {
+  ws_server * server = (ws_server *)_self;
+  if (!server || !server->events.onperodic) return NULL;
+  server->events.onperodic(server);
+  return NULL;
 }
 
 void ws_event_loop (ws_server * server)
@@ -452,7 +510,10 @@ void ws_event_loop (ws_server * server)
   int conn_sock, nfds;
   struct sockaddr_in servaddr;
   socklen_t addrlen = sizeof(servaddr);
-  if (server->timeout > 0 && server->onperodic) {
+
+  struct epoll_event events[MAX_EVENTS] = {0};
+
+  if (server->timeout > 0 && server->events.onperodic) {
     int time_fd = timerfd_create(CLOCK_MONOTONIC, 0);
     if (time_fd > 0) {
       if (my_epoll_add(server->epollfd, time_fd, EPOLLIN | EPOLLET) < 0) {
@@ -472,7 +533,7 @@ void ws_event_loop (ws_server * server)
   }
 
   for (;;) {
-    nfds = epoll_wait (server->epollfd, server->events, MAX_EVENTS, -1);
+    nfds = epoll_wait (server->epollfd, events, MAX_EVENTS, -1);
     if (nfds == -1) {
       #ifndef NDEBUG
       perror ("epoll_wait");
@@ -481,7 +542,7 @@ void ws_event_loop (ws_server * server)
     }
     int n, client_index;
     for (n = 0; n < nfds; ++n) {
-      if (server->events[n].data.fd == server->listen_sock) {
+      if (events[n].data.fd == server->listen_sock) {
         conn_sock = accept (server->listen_sock,
                             (struct sockaddr *) &servaddr, &addrlen);
         if (conn_sock == -1) {
@@ -520,17 +581,34 @@ void ws_event_loop (ws_server * server)
           closesocket(conn_sock);
         }
 
-      } else if (server->events[n].data.fd == server->time_fd) {
+      } else if (events[n].data.fd == server->time_fd) {
         unsigned long long val;
         static int n_id;
-        if (read(server->events[n].data.fd, &val, sizeof(val)) > 0) {
+        if (read(events[n].data.fd, &val, sizeof(val)) > 0) {
           printf("Received timerfd event via epoll: %d\n", n_id++);
         }
-        if (server->onperodic)
-          server->onperodic(server);
+        if (server->events.onperodic) {
+          pthread_t periodic_thread;
+          if (pthread_create(&periodic_thread, NULL, __ws_call_periodic, server)) {
+            #ifndef NDEBUG
+            perror ("pthread_create");
+            #endif
+            exit(EXIT_FAILURE);
+          }
+          pthread_detach(periodic_thread);
+        }
       } else {
-        client_index = server->events[n].data.fd;
-        get_frame (&server->clients[client_index]);
+        client_index = events[n].data.fd;
+        pthread_t client_thread;
+        if (pthread_create(
+          &client_thread, NULL, get_frame, &server->clients[client_index]
+        )) {
+          #ifndef NDEBUG
+          perror ("pthread_create");
+          #endif
+          exit(EXIT_FAILURE);
+        }
+        pthread_detach(client_thread);
       }
     }
   }
@@ -552,20 +630,17 @@ ws_server *ws_event_create_server (const char *port)
   if (!server)
     return NULL;
 
+  if (pthread_mutex_init(&server->mtx, NULL))
+    goto clean_up;
+
   server->epollfd = epoll_create1 (0);
-  server->events = calloc (MAX_EVENTS, sizeof (struct epoll_event));
+  memset(&server->events, 0, sizeof(struct ws_event_list));
   server->listen_sock = listen_sock;
   server->timeout = 10000;
   server->time_fd = -1;
 
-  if (!server->events) {
-    goto clean_up;
-  }
   server->max_fd = MAX_EVENTS;
-  server->clients = (ws_client *) malloc (sizeof (ws_client) * MAX_EVENTS);
-  if (!server->clients) {
-    goto clean_up;
-  }
+  server->clients = NULL;
   if (server->epollfd == -1) {
     #ifndef NDEBUG
     perror ("epoll_create1");
@@ -578,19 +653,11 @@ ws_server *ws_event_create_server (const char *port)
     #endif
     goto clean_up;
   }
-  server->onopen = NULL;
-  server->onmessage = NULL;
-  server->onclose = NULL;
-  server->onping = NULL;
-  server->onpong = NULL;
-  server->onperodic = NULL;
 
   return server;
 
 clean_up:
   if (server->epollfd != -1) closesocket(server->epollfd);
-  if (server->events) free (server->events);
-  if (server->clients) free (server->clients);
   free(server);
   return NULL;
 }
@@ -605,6 +672,7 @@ void ws_send_bytes_broadcast (ws_client *cli, const char *msg, size_t msg_len, i
   ws_server *server = cli->server;
   if (!server) return;
   int client_idx;
+  pthread_mutex_lock(&server->mtx);
   for (client_idx = 0; client_idx < server->max_fd; client_idx++) {
     ws_client *client = &server->clients[client_idx];
     if (client->fd == cli->fd) continue;
@@ -612,6 +680,7 @@ void ws_send_bytes_broadcast (ws_client *cli, const char *msg, size_t msg_len, i
       send_frame(client, op, msg, msg_len);
     }
   }
+  pthread_mutex_unlock(&server->mtx);
 }
 void ws_send_all(ws_server *server, const char *msg) {
   ws_send_bytes_all(server, msg, msg ? strlen(msg) : 0, TEXT);
@@ -619,15 +688,18 @@ void ws_send_all(ws_server *server, const char *msg) {
 void ws_send_bytes_all(ws_server *server, const char *msg, size_t msg_len, int op) {
   if (!server || !msg || msg_len == 0) return;
   int client_idx;
+  pthread_mutex_lock(&server->mtx);
   for (client_idx = 0; client_idx < server->max_fd; client_idx++) {
     ws_client *client = &server->clients[client_idx];
     if (client != NULL && client->state != 0) {
       send_frame(client, op, msg, msg_len);
     }
   }
+  pthread_mutex_unlock(&server->mtx);
 }
 void ws_event_dispose(ws_server *server) {
   if (!server) return;
+  pthread_mutex_destroy(&server->mtx);
   closesocket(server->epollfd);
   closesocket(server->listen_sock);
   closesocket(server->time_fd);

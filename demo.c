@@ -35,10 +35,10 @@ int main (int argc, char **argv)
   }
   ws_server *server = ws_event_create_server (port);
   if (!server) return -1;
-  server->onopen = onopen;
-  server->onclose = onclose;
-  server->onmessage = ondata;
-  server->onperodic = onperodic;
+  server->events.onopen = onopen;
+  server->events.onclose = onclose;
+  server->events.onmessage = ondata;
+  server->events.onperodic = onperodic;
   ws_event_loop (server);
   ws_event_dispose (server);
   return 0;
