@@ -4,6 +4,7 @@
 #include <math.h>
 #include <endian.h>
 #include <sys/timerfd.h>
+#include <netinet/tcp.h>
 
 #define MAX_WS_PAD (BUFFER_SIZE - 11)
 
@@ -35,6 +36,16 @@ static int create_and_bind (const char *port) {
       continue;
 
     if (setsockopt(sfd, SOL_SOCKET, SO_REUSEADDR, (char *)&on, sizeof(on)) < 0) {
+      closesocket(sfd);
+      continue;
+    }
+    
+    if (setsockopt(sfd, IPPROTO_TCP, TCP_NODELAY, (char *)&on, sizeof(on)) < 0) {
+      closesocket(sfd);
+      continue;
+    }
+    
+    if (setsockopt(sfd, IPPROTO_TCP, TCP_QUICKACK, (char *)&on, sizeof(on)) < 0) {
       closesocket(sfd);
       continue;
     }
@@ -561,7 +572,7 @@ ws_server *ws_event_create_server (const char *port)
     #endif
     goto clean_up;
   }
-  if (my_epoll_add (server->epollfd, listen_sock, EPOLLIN) == -1) {
+  if (my_epoll_add (server->epollfd, listen_sock, EPOLLIN | EPOLLET) == -1) {
     #ifndef NDEBUG
     perror ("epoll_ctl: listen_sock");
     #endif
