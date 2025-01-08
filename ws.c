@@ -137,7 +137,7 @@ static int ws_client_restrict_write(int fd, const void *buf, size_t len) {
     if (rc <= 0) break;
     buf2 += rc;
     left -= (size_t)rc;
-  } while ((errno == EAGAIN || errno == EWOULDBLOCK) && left > 0);
+  } while (left > 0);
   if (left != 0) return -1;
   return (int)len;
 }
