@@ -3,9 +3,9 @@
 static void onopen(ws_client *cli) {
   (void)cli;
   printf("connected\n");
-  char *s = malloc(13488);
+  char *s = malloc(12498);
   if (!s) return;
-  memset(s, 0, 13488);
+  memset(s, 0, 12498);
   strcat(s, "Iran Was 'Defeated Very Badly' in Syria, a Top General Admits\n\n");
   strcat(s, "For weeks, Iranian officials have downplayed the fall of their ally in Syria.\n");
   strcat(s, "But an important general has offered a remarkably candid view of the blow\n");
@@ -195,6 +195,7 @@ static void onopen(ws_client *cli) {
   strcat(s, "officials in Mr. al-Assad's government.\n\n");
   strcat(s, "The threat of smuggling \"shall not return and we are ready to cooperate\n");
   strcat(s, "intensively on this matter,\" Mr. al-Shibani said.");
+  printf("size = %ld\n", strlen(s));
   ws_send(cli, s);
   free(s);
 }

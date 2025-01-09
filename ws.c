@@ -302,19 +302,20 @@ static void send_frame (
   int i;
   int frame_count = ceil((float)payload_size / (float)MAX_WS_PAD);
   if (frame_count == 0) frame_count = 1;
-  char frame_data[BUFFER_SIZE] = {0};
+  unsigned char frame_data[BUFFER_SIZE] = {0};
   for (i = 0; i < frame_count; i++) {
     uint64_t frame_size = i != frame_count - 1 ? MAX_WS_PAD : payload_size % MAX_WS_PAD;
-    char op_code = i != 0 ? 0x0 : 0x80 | opcode;
-    char fin = i != frame_count - 1 ? 0x0 : 0x1;
+    char op_code = i != 0 ? 0 : opcode;
+    char fin = i != frame_count - 1 ? 0 : 1;
     memset(frame_data, 0, sizeof(frame_data));
     uint64_t frame_length = frame_size;
     int offset = 2;
-    frame_data[0] = (((fin << 7) & 0x80) | op_code);
-    if (frame_size < 126) {
+    frame_data[0] |= (fin << 7) & 0x80;
+    frame_data[0] |= op_code & 0xf;
+    if (frame_size <= 125) {
       frame_data[1] = frame_size & 0x7f;
       frame_length += 2;
-    } else if (frame_size == 126) {
+    } else if (frame_size >= 126 && frame_size <= 65535) {
       frame_data[1] = 126;
       frame_data[2] = (frame_size >> 8) & 255;
       frame_data[3] = (frame_size & 255);
@@ -322,14 +323,14 @@ static void send_frame (
       offset += 2;
     } else {
       frame_data[1] = 127;
-      frame_data[2] = ((frame_size >> 56) & 255);
-      frame_data[3] = ((frame_size >> 48) & 255);
-      frame_data[4] = ((frame_size >> 40) & 255);
-      frame_data[5] = ((frame_size >> 32) & 255);
-      frame_data[6] = ((frame_size >> 24) & 255);
-      frame_data[7] = ((frame_size >> 16) & 255);
-      frame_data[8] = ((frame_size >> 8) & 255);
-      frame_data[9] = (frame_size & 255);
+      frame_data[2] = (unsigned char)((frame_size >> 56) & 255);
+      frame_data[3] = (unsigned char)((frame_size >> 48) & 255);
+      frame_data[4] = (unsigned char)((frame_size >> 40) & 255);
+      frame_data[5] = (unsigned char)((frame_size >> 32) & 255);
+      frame_data[6] = (unsigned char)((frame_size >> 24) & 255);
+      frame_data[7] = (unsigned char)((frame_size >> 16) & 255);
+      frame_data[8] = (unsigned char)((frame_size >> 8) & 255);
+      frame_data[9] = (unsigned char)(frame_size & 255);
       frame_length += 10;
       offset += 8;
     }
