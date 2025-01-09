@@ -175,6 +175,27 @@ static int __ws_set_client_state(ws_client* _self, int state) {
   return 0;
 }
 
+static ws_client * __ws_get_client(ws_server *server, int fd) {
+  ws_client *cli = NULL;
+  int i, slots;
+  if (!server || fd < 0 || !server->clients) return NULL;
+  slots = server->max_fd > 0 ? server->max_fd : 1;
+  pthread_mutex_lock(&server->mtx);
+  if (fd < slots && server->clients[fd].fd == fd) {
+    cli = &server->clients[fd];
+    pthread_mutex_unlock(&server->mtx);
+    return cli;
+  }
+  for (i = 0; i < slots; i++) {
+    if (server->clients[i].fd == fd) {
+      cli = &server->clients[i];
+      break;
+    }
+  }
+  pthread_mutex_unlock(&server->mtx);
+  return cli;
+}
+
 static void *create_client (int fd, ws_server * server) {
   if (!server) return NULL;
   if (!server->clients || server->max_fd < fd) {
@@ -210,25 +231,22 @@ static void *create_client (int fd, ws_server * server) {
 }
 
 static void close_client (ws_client * client) {
-  if (client != NULL) {
-    ws_server *server = client->server;
-    my_epoll_delete(server->epollfd, client->fd);
-    closesocket (client->fd);
+  if (!client) return;
+  ws_server *server = client->server;
+  my_epoll_delete(server->epollfd, client->fd);
+  closesocket (client->fd);
 
-    pthread_mutex_destroy(&client->mtx_sta);
-    pthread_mutex_destroy(&client->mtx_snd);
+  pthread_mutex_destroy(&client->mtx_sta);
+  pthread_mutex_destroy(&client->mtx_snd);
 
-    if (client->fd < server->max_fd) {
-      pthread_mutex_lock(&server->mtx);
-      server->clients[client->fd] = (struct _client) { 0 };      // delete the client
-      pthread_mutex_unlock(&server->mtx);
-    }
-  }
+  pthread_mutex_lock(&server->mtx);
+  server->clients[client->fd] = (struct _client) { 0 };      // delete the client
+  pthread_mutex_unlock(&server->mtx);
 }
 
 static int handle_verify (ws_client * client) {
   if (!client) return -1;
-  if (client->state) return 0;
+  if (__ws_get_client_state(client) != 0) return 0;
   //get all http request data and then parse it
   //split the request and then get the  header "sec-websocket-key" and the get the value
   char buf[BUFFER_SIZE] = {0};
@@ -286,41 +304,39 @@ static void send_frame (
   if (frame_count == 0) frame_count = 1;
   char frame_data[BUFFER_SIZE] = {0};
   for (i = 0; i < frame_count; i++) {
-    int frame_size = i != frame_count - 1 ? MAX_WS_PAD : payload_size % MAX_WS_PAD;
+    uint64_t frame_size = i != frame_count - 1 ? MAX_WS_PAD : payload_size % MAX_WS_PAD;
     char op_code = i != 0 ? 0x0 : 0x80 | opcode;
     char fin = i != frame_count - 1 ? 0x0 : 0x1;
     memset(frame_data, 0, sizeof(frame_data));
-    int frame_length = frame_size;
+    uint64_t frame_length = frame_size;
+    int offset = 2;
+    frame_data[0] = (((fin << 7) & 0x80) | op_code);
     if (frame_size < 126) {
-      frame_data[0] = fin | op_code;
-      frame_data[1] = frame_size;
-      memcpy (frame_data + 2, &payload[i * MAX_WS_PAD], frame_size);
+      frame_data[1] = frame_size & 0x7f;
       frame_length += 2;
     } else if (frame_size == 126) {
-      frame_data[0] = fin | op_code;
-      frame_data[1] = frame_size;
-      char *payload_size_extra = (char *) &frame_size;
-      frame_data[2] = payload_size_extra[0];
-      frame_data[3] = payload_size_extra[1];
-      memcpy (frame_data + 4, &payload[i * MAX_WS_PAD], frame_size);
+      frame_data[1] = 126;
+      frame_data[2] = (frame_size >> 8) & 255;
+      frame_data[3] = (frame_size & 255);
       frame_length += 4;
+      offset += 2;
     } else {
-      frame_data[0] = fin | op_code;
       frame_data[1] = 127;
-      frame_data[2] = (0 >> 24) & 0xFF;
-      frame_data[3] = (0 >> 16) & 0xFF;
-      frame_data[4] = (0 >> 8) & 0xFF;
-      frame_data[5] = 0 & 0xFF;
-      frame_data[6] = (frame_size >> 24) & 0xFF;
-      frame_data[7] = (frame_size >> 16) & 0xFF;
-      frame_data[8] = (frame_size >> 8) & 0xFF;
-      frame_data[9] = frame_size & 0xFF;
-      memcpy (frame_data + 10, &payload[i * MAX_WS_PAD], frame_size);
+      frame_data[2] = ((frame_size >> 56) & 255);
+      frame_data[3] = ((frame_size >> 48) & 255);
+      frame_data[4] = ((frame_size >> 40) & 255);
+      frame_data[5] = ((frame_size >> 32) & 255);
+      frame_data[6] = ((frame_size >> 24) & 255);
+      frame_data[7] = ((frame_size >> 16) & 255);
+      frame_data[8] = ((frame_size >> 8) & 255);
+      frame_data[9] = (frame_size & 255);
       frame_length += 10;
+      offset += 8;
     }
+    memcpy (frame_data + offset, &payload[i * MAX_WS_PAD], frame_size);
     frame_data[frame_length] = '\0';
     pthread_mutex_lock(&client->mtx_snd);
-    if (ws_client_restrict_write(client->fd, frame_data, frame_length) != frame_length) {
+    if ((uint64_t)ws_client_restrict_write(client->fd, frame_data, frame_length) != frame_length) {
       #ifndef NDEBUG
       if (frame_length > 0) {
         printf("send frame data is not completed\n");
@@ -540,7 +556,7 @@ void ws_event_loop (ws_server * server)
       #endif
       exit(EXIT_FAILURE);
     }
-    int n, client_index;
+    int n;
     for (n = 0; n < nfds; ++n) {
       if (events[n].data.fd == server->listen_sock) {
         conn_sock = accept (server->listen_sock,
@@ -598,17 +614,19 @@ void ws_event_loop (ws_server * server)
           pthread_detach(periodic_thread);
         }
       } else {
-        client_index = events[n].data.fd;
-        pthread_t client_thread;
-        if (pthread_create(
-          &client_thread, NULL, get_frame, &server->clients[client_index]
-        )) {
-          #ifndef NDEBUG
-          perror ("pthread_create");
-          #endif
-          exit(EXIT_FAILURE);
+        ws_client *cli = __ws_get_client(server, events[n].data.fd);
+        if (cli != NULL) {
+          pthread_t client_thread;
+          if (pthread_create(
+            &client_thread, NULL, get_frame, cli
+          )) {
+            #ifndef NDEBUG
+            perror ("pthread_create");
+            #endif
+            exit(EXIT_FAILURE);
+          }
+          pthread_detach(client_thread);
         }
-        pthread_detach(client_thread);
       }
     }
   }
