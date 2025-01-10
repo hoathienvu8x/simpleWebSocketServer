@@ -44,6 +44,9 @@ struct _client {
   ws_server *server;
   pthread_mutex_t mtx_snd;
   pthread_mutex_t mtx_sta;
+  size_t id;
+  struct _client *prev;
+  struct _client *next;
 };
 
 struct ws_event_list {
@@ -56,14 +59,15 @@ struct ws_event_list {
 };
 
 struct _server {
-  ws_client *clients;           //all of the connection client
+  struct {
+    ws_client *head, *tail;
+  } clients;           //all of the connection client
   int client_size;              // client scale
   int epollfd;                  //epoll listenfd
   int time_fd;
   int listen_sock;
   struct ws_event_list events;
   int current_event_size;
-  int max_fd;                   //current max fd
   unsigned int timeout;
   pthread_mutex_t mtx;
 };
