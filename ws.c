@@ -549,8 +549,9 @@ static void * __ws_call_periodic(void *_self) {
   return NULL;
 }
 
-void ws_event_loop (ws_server * server)
+static void * __ws_event_loop (void *data)
 {
+  ws_server * server = (ws_server *)data;
   /* Code to set up listening socket, 'listen_sock',
      (socket(), bind(), listen()) omitted */
   int conn_sock, nfds;
@@ -584,7 +585,7 @@ void ws_event_loop (ws_server * server)
       #ifndef NDEBUG
       perror ("epoll_wait");
       #endif
-      exit(EXIT_FAILURE);
+      return NULL;
     }
     int n;
     for (n = 0; n < nfds; ++n) {
@@ -596,7 +597,7 @@ void ws_event_loop (ws_server * server)
           #ifndef NDEBUG
           perror ("accept");
           #endif
-          exit(EXIT_FAILURE);
+          return NULL;
         }
         if (__ws_set_non_blocking (conn_sock) < 0) {
           __ws_close_socket(conn_sock);
@@ -659,6 +660,7 @@ void ws_event_loop (ws_server * server)
       }
     }
   }
+  return NULL;
 }
 
 ws_server *ws_event_create_server (const char *port)
@@ -673,7 +675,7 @@ ws_server *ws_event_create_server (const char *port)
     #endif
     return NULL;
   }
-  ws_server *server = (ws_server *) malloc (sizeof (ws_server));
+  ws_server *server = (ws_server *) calloc (1, sizeof (ws_server));
   if (!server)
     return NULL;
 
@@ -778,4 +780,21 @@ void ws_send_bytes(ws_client *client, const char *msg, size_t len, int opcode) {
 }
 void ws_event_close(ws_client *client, const char *reason) {
   handle_close(client, 1000, reason);
+}
+void ws_event_listen (ws_server * server, int as_thread) {
+  if (!server) return;
+  if (as_thread) {
+    if (pthread_create(&server->thread, 0, __ws_event_loop, server)) {
+      exit(EXIT_FAILURE);
+    }
+  } else {
+    __ws_event_loop(server);
+  }
+}
+
+void ws_event_hold(ws_server *server) {
+  if (!server) return;
+  if (server->thread) {
+    pthread_join(server->thread, 0);
+  }
 }

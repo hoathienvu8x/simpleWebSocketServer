@@ -70,6 +70,7 @@ struct _server {
   int current_event_size;
   unsigned int timeout;
   pthread_mutex_t mtx;
+  pthread_t thread;
 };
 
 void ws_send_broadcast (ws_client *cli, const char *msg);
@@ -83,7 +84,8 @@ void ws_send_bytes(ws_client *client, const char *msg, size_t len, int op);
 void ws_event_close(ws_client *client, const char *reason);
 ws_server *ws_event_create_server (const char *port);
 void ws_event_set_timeout(ws_server *srv, unsigned int timeout);
-void ws_event_loop (ws_server * server);
+void ws_event_listen (ws_server * server, int as_thread);
 void ws_event_dispose(ws_server *server);
+void ws_event_hold(ws_server *server);
 
 #endif

@@ -234,7 +234,7 @@ int main (int argc, char **argv)
   server->events.onclose = onclose;
   server->events.onmessage = ondata;
   server->events.onperodic = onperodic;
-  ws_event_loop (server);
+  ws_event_listen (server, 0);
   ws_event_dispose (server);
   return 0;
 }
