@@ -219,6 +219,29 @@ static int __ws_set_client_state(ws_client* _self, int state) {
 
 static int __ws_handshake(ws_client *cli) {
   if (!cli) return -1;
+  char *ws_key = "agugu";
+  char buf[BUFFER_SIZE] = {0};
+  if (cli->url.origin && strlen(cli->url.origin) > 0) {
+    if (snprintf(
+      buf, sizeof(buf) - 1, "GET /%s HTTP/1.1\r\nHost: %s\r\nUpgrade: websocket\r\n"
+      "Connection: Upgrade\r\nSec-WebSocket-Key: %s\r\n"
+      "Sec-WebSocket-Version: 13\r\nOrigin: %s\r\n\r\n",
+      cli->url.path, cli->url.host, ws_key, cli->url.origin
+    ) <= 0) {
+      return -1;
+    }
+  } else {
+    if (snprintf(
+      buf, sizeof(buf) - 1, "GET /%s HTTP/1.1\r\nHost: %s\r\nUpgrade: websocket\r\n"
+      "Connection: Upgrade\r\nSec-WebSocket-Key: %s\r\n"
+      "Sec-WebSocket-Version: 13\r\n\r\n",
+      cli->url.path, cli->url.host, ws_key
+    ) <= 0) {
+      return -1;
+    }
+  }
+  printf("buf = %s\n", buf);
+  return -1;
   __ws_set_client_state(cli, WS_STATE_OPEN);
   __ws_epoll_mod(cli->epollfd, cli->listen_sock, EPOLLIN);
   return 0;
@@ -559,6 +582,9 @@ ws_client *ws_event_create_client (void *data) {
 
   __ws_set_client_state(rv, WS_STATE_CONNECTING);
 
+  rv->listen_sock = -1;
+  rv->epollfd = -1;
+
   rv->data = data;
 
   rv->id = ws_client_counter++;
@@ -571,6 +597,7 @@ void ws_client_connect(ws_client *client, const char *url, const char *origin) {
   if (snprintf(port, sizeof(port) - 1, "%d", client->url.port) <= 0) {
     return;
   }
+  printf("%s -> %s\n", client->url.host, port);
   int fd = create_and_connect(client->url.host, port);
   if (fd < 0) return;
   int ep = epoll_create1(0);
@@ -601,9 +628,12 @@ void ws_event_dispose(ws_client *client) {
 
   ws_client_counter--;
 
-  __ws_epoll_delete(client->epollfd, client->listen_sock);
+  if (client->listen_sock != -1) {
+    __ws_epoll_delete(client->epollfd, client->listen_sock);
 
-  __ws_close_socket (client->listen_sock);
+    __ws_close_socket (client->listen_sock);
+  }
+  if (client->epollfd != -1) __ws_close_socket(client->epollfd);
 
   pthread_mutex_destroy(&client->mtx_sta);
   pthread_mutex_destroy(&client->mtx_snd);
