@@ -56,6 +56,7 @@ struct ws_event_list {
   void (*onpong)(ws_client *);
   void (*onmessage)(ws_client *, int, const char *, size_t);
   void (*onperodic)(ws_server *);
+  int (*is_route)(ws_client *, const char *);
 };
 
 struct _server {

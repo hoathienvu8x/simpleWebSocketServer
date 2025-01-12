@@ -205,6 +205,12 @@ static void onclose(ws_client *cli) {
   printf("disconected\n");
 }
 
+static int check_route(ws_client *cli, const char *path) {
+  (void)cli;
+  if (strcmp(path, "/stream") == 0) return 1;
+  return 0;
+}
+
 static void ondata(ws_client *cli, int opcode, const char *data, size_t len) {
   if (opcode == TEXT) {
     if (len < BUFFER_SIZE)
@@ -234,6 +240,7 @@ int main (int argc, char **argv)
   server->events.onclose = onclose;
   server->events.onmessage = ondata;
   server->events.onperodic = onperodic;
+  server->events.is_route = check_route;
   ws_event_listen (server, 0);
   ws_event_dispose (server);
   return 0;

@@ -285,6 +285,18 @@ static int handle_verify (ws_client * client) {
   if (strstr(buf, "\r\n\r\n") == NULL) return -1;
   buf[blen] = '\0';
   if (strncasecmp(buf, "GET ", 4) != 0) return -1;
+  if (client->server->events.is_route) {
+    char path[256] = {0};
+    size_t p = strcspn(buf + 4, "?# ");
+    if (p != strlen(buf + 4)) {
+      memcpy(path, buf + 4, p);
+      path[p] = '\0';
+    } else {
+      memcpy(path, buf + 4, strlen(buf + 4));
+    }
+    if (!client->server->events.is_route(client, path)) return -1;
+  }
+
   char *start = NULL;
   start = strstr (buf, "Sec-WebSocket-Key");
   if (!start) return -1;
