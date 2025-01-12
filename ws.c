@@ -117,6 +117,86 @@ static int __ws_restrict_write(int fd, const void *buf, size_t len) {
   return (int)len;
 }
 
+static int __ws_parse_url(const char *url, struct url_t *p) {
+  if (!url || strlen(url) == 0) return -1;
+  if (sscanf(url, "ws://%[^:/]:%d/%s", p->host, &p->port, p->path) == 3) {
+    return 0;
+  }
+  if (sscanf(url, "ws://%[^:/]/%s", p->host, p->path) == 2) {
+    p->port = 80;
+    return 0;
+  }
+  if (sscanf(url, "ws://%[^:/]:%d", p->host, &p->port) == 2) {
+    p->path[0] = '\0';
+    return 0;
+  }
+  if (sscanf(url, "ws://%[^:/]", p->host) == 1) {
+    p->port = 80;
+    p->path[0] = '\0';
+  }
+  return -1;
+}
+
+static int create_and_connect (const char *host, const char *port) {
+  struct addrinfo hints;
+  struct addrinfo *result, *rp;
+  int s, sfd, on = 1;
+
+  memset (&hints, 0, sizeof (struct addrinfo));
+  hints.ai_family = AF_UNSPEC;  /* Return IPv4 and IPv6 choices */
+  hints.ai_socktype = SOCK_STREAM;      /* We want a TCP socket */
+  hints.ai_flags = AI_PASSIVE;  /* All interfaces */
+
+  s = getaddrinfo (host, port, &hints, &result);
+  if (s != 0) {
+    #ifndef NDEBUG
+    fprintf (stderr, "getaddrinfo: %s\n", gai_strerror (s));
+    #endif
+    return -1;
+  }
+
+  for (rp = result; rp != NULL; rp = rp->ai_next) {
+    sfd = socket (rp->ai_family, rp->ai_socktype | SOCK_NONBLOCK, rp->ai_protocol);
+    if (sfd == -1)
+      continue;
+
+    if (setsockopt(sfd, SOL_SOCKET, SO_REUSEADDR, (char *)&on, sizeof(on)) < 0) {
+      __ws_close_socket(sfd);
+      continue;
+    }
+    
+    if (setsockopt(sfd, IPPROTO_TCP, TCP_NODELAY, (char *)&on, sizeof(on)) < 0) {
+      __ws_close_socket(sfd);
+      continue;
+    }
+    
+    if (setsockopt(sfd, IPPROTO_TCP, TCP_QUICKACK, (char *)&on, sizeof(on)) < 0) {
+      __ws_close_socket(sfd);
+      continue;
+    }
+
+    s = connect (sfd, rp->ai_addr, rp->ai_addrlen);
+    if (s == 0) {
+      /* We managed to bind successfully! */
+      break;
+    }
+
+    __ws_close_socket (sfd);
+  }
+
+  if (rp == NULL) {
+    freeaddrinfo (result);
+    #ifndef NDEBUG
+    fprintf (stderr, "Could not connect\n");
+    #endif
+    return -1;
+  }
+
+  freeaddrinfo (result);
+
+  return sfd;
+}
+
 static int __ws_get_client_state(ws_client* _self) {
   int state;
   if (!_self) return -1;
@@ -475,6 +555,8 @@ ws_client *ws_event_create_client (void *data) {
   }
 
   memset(&rv->buf, 0, sizeof(rv->buf));
+  memset(&rv->url, 0, sizeof(struct url_t));
+
   __ws_set_client_state(rv, WS_STATE_CONNECTING);
 
   rv->data = data;
@@ -484,8 +566,21 @@ ws_client *ws_event_create_client (void *data) {
 }
 void ws_client_connect(ws_client *client, const char *url, const char *origin) {
   if (!client || !url) return;
-  client->url = url;
-  client->origin = origin;
+  if (__ws_parse_url(url, &client->url)) return;
+  char port[50] = {0};
+  if (snprintf(port, sizeof(port) - 1, "%d", client->url.port) <= 0) {
+    return;
+  }
+  int fd = create_and_connect(client->url.host, port);
+  if (fd < 0) return;
+  int ep = epoll_create1(0);
+  if (ep < 0) return;
+  client->listen_sock = fd;
+  client->epollfd = ep;
+  if (__ws_epoll_add(ep, fd, EPOLLOUT) < 0) {
+    return;
+  }
+  client->url.origin = origin;
 }
 void ws_event_set_timeout(ws_client *cli, unsigned int timeout) {
   if (!cli) return;
