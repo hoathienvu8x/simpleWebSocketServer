@@ -212,7 +212,7 @@ static int check_route(ws_client *cli, const char *path) {
 }
 
 static void ondata(ws_client *cli, int opcode, const char *data, size_t len) {
-  if (opcode == TEXT) {
+  if (opcode == WS_FR_OP_TEXT) {
     if (len < BUFFER_SIZE)
       printf("recv (%ld): %s\n", len, data);
     else

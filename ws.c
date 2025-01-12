@@ -10,6 +10,11 @@
 
 #define MAX_WS_PAD (BUFFER_SIZE - 11)
 
+#define WS_STATE_CONNECTING 0
+#define WS_STATE_OPEN       1
+#define WS_STATE_CLOSING    2
+#define WS_STATE_CLOSED     3
+
 static size_t ws_client_counter = 0;
 
 #define __ws_disponse(p) do { if (p) { free(p); p = NULL; } } while (0)
@@ -167,7 +172,7 @@ static int __ws_get_client_state(ws_client* _self) {
 
 static int __ws_set_client_state(ws_client* _self, int state) {
   if (!_self) return -1;
-  if (state < 0 || state > 3)
+  if (state < WS_STATE_CONNECTING || state > WS_STATE_CLOSED)
     return -1;
   pthread_mutex_lock(&_self->mtx_sta);
   if (_self->state != state)
@@ -210,7 +215,7 @@ static void *create_client (int fd, ws_server * server) {
   }
 
   memset(&client->buf, 0, sizeof(client->buf));
-  __ws_set_client_state(client, 0);
+  __ws_set_client_state(client, WS_STATE_CONNECTING);
   client->fd = fd;
   client->server = server;
 
@@ -270,7 +275,7 @@ static void __ws_close_client(ws_client *client) {
 
 static int handle_verify (ws_client * client) {
   if (!client) return -1;
-  if (__ws_get_client_state(client) != 0) return 0;
+  if (__ws_get_client_state(client) != WS_STATE_CONNECTING) return 0;
   //get all http request data and then parse it
   //split the request and then get the  header "sec-websocket-key" and the get the value
   char buf[BUFFER_SIZE] = {0};
@@ -326,25 +331,25 @@ static int handle_verify (ws_client * client) {
     return -1;
   }
   pthread_mutex_unlock(&client->mtx_snd);
-  __ws_set_client_state(client, 1);
+  __ws_set_client_state(client, WS_STATE_OPEN);
   return 0;
 }
 
 static void send_frame (
-  ws_client * client, int opcode, const char *payload, size_t payload_size
+  ws_client * client, int op, const char *payload, size_t payload_size
 ) {
   if (!client) return;
-  if (opcode == TEXT || opcode == BINARY) {
+  if (op == WS_FR_OP_TEXT || op == WS_FR_OP_BINARY) {
     if (!payload || payload_size == 0) return;
   }
-  if (__ws_get_client_state(client) != 1) return;
+  if (__ws_get_client_state(client) != WS_STATE_OPEN) return;
   int i;
   int frame_count = ceil((float)payload_size / (float)MAX_WS_PAD);
   if (frame_count == 0) frame_count = 1;
   unsigned char frame_data[BUFFER_SIZE] = {0};
   for (i = 0; i < frame_count; i++) {
     uint64_t frame_size = i != frame_count - 1 ? MAX_WS_PAD : payload_size % MAX_WS_PAD;
-    char op_code = i != 0 ? 0 : opcode;
+    char op_code = i != 0 ? WS_FR_OP_CONT : op;
     char fin = i != frame_count - 1 ? 0 : 1;
     memset(frame_data, 0, sizeof(frame_data));
     uint64_t frame_length = frame_size;
@@ -390,8 +395,7 @@ static void send_frame (
 static void handle_ping (ws_client * client)
 {
   if (!client) return;
-  enum opcode enum_opcode = PONG;
-  send_frame (client, enum_opcode, NULL, 0);
+  send_frame (client, WS_FR_OP_PONG, NULL, 0);
 }
 
 static void handle_close (ws_client * client, int code, const char *reason)
@@ -399,7 +403,7 @@ static void handle_close (ws_client * client, int code, const char *reason)
   if (!client) return;
   //handle the close
   int reason_size = reason ? strlen (reason) : 0;
-  enum opcode close_opcode = CLOSE;
+  enum opcode close_opcode = WS_FR_OP_CLOSE;
   int payload_size = reason_size + 2;
   char *payload = (char *) malloc (sizeof (char) * payload_size);
   if (!payload)
@@ -425,13 +429,13 @@ static void handle_all_frame (ws_client * client, ws_frame * frame)
   //handle the ws_frame
   enum opcode enum_opcode = (enum opcode) frame->opcode;
   switch (enum_opcode) {
-  case TEXT: case BINARY: {
+  case WS_FR_OP_TEXT: case WS_FR_OP_BINARY: {
       if (client->server->events.onmessage)
         client->server->events.onmessage(
           client, frame->opcode, frame->payload, frame->payload_len
         );
     } break;
-  case CLOSE: {
+  case WS_FR_OP_CLOSE: {
       char *reason = NULL;
       if (strlen (frame->payload) > 2) {
         reason = &frame->payload[2];
@@ -439,13 +443,13 @@ static void handle_all_frame (ws_client * client, ws_frame * frame)
       short close_code = (short) *(frame->payload);
       handle_close (client, close_code, reason);
     } break;
-  case PING: {
+  case WS_FR_OP_PING: {
     if (client->server->events.onping)
       client->server->events.onping(client);
     else
       handle_ping (client);
     } break;
-  case PONG: {
+  case WS_FR_OP_PONG: {
       if (client->server->events.onpong)
         client->server->events.onpong(client);
     } break;
@@ -464,7 +468,7 @@ static void *__ws_handle_client (void *_self)
   ws_client * client = (ws_client *)_self;
   if (!client) return NULL;
 
-  if (__ws_get_client_state(client) != 1) {
+  if (__ws_get_client_state(client) != WS_STATE_OPEN) {
     int result = handle_verify (client);
     if (result) {
       if((errno == EWOULDBLOCK || errno == EAGAIN)) return NULL;
@@ -474,7 +478,7 @@ static void *__ws_handle_client (void *_self)
     if (client->server->events.onopen)
       client->server->events.onopen(client);
   }
-  if (__ws_get_client_state(client) != 1) return NULL;
+  if (__ws_get_client_state(client) != WS_STATE_OPEN) return NULL;
   char *payload = NULL;
   uint64_t recv_len = 0;
   for (;;) {
@@ -486,7 +490,7 @@ static void *__ws_handle_client (void *_self)
     }
 
     uint8_t opcode = data[0] & 15;
-    int beg = opcode != CONT;
+    int beg = opcode != WS_FR_OP_CONT;
     int fin = data[0] >> 7;
     int mask = data[1] >> 7;
     uint8_t mask_key[4] = {0};
@@ -743,7 +747,7 @@ clean_up:
 
 void ws_send_broadcast (ws_client *cli, const char *msg)
 {
-  ws_send_bytes_broadcast(cli, msg, msg ? strlen(msg) : 0, TEXT);
+  ws_send_bytes_broadcast(cli, msg, msg ? strlen(msg) : 0, WS_FR_OP_TEXT);
 }
 void ws_send_bytes_broadcast (ws_client *cli, const char *msg, size_t msg_len, int op)
 {
@@ -755,7 +759,7 @@ void ws_send_bytes_broadcast (ws_client *cli, const char *msg, size_t msg_len, i
   ws_client *client = server->clients.head;
   while (client != NULL) {
     if (client->fd != cli->fd) {
-      if (__ws_get_client_state(client) == 1) {
+      if (__ws_get_client_state(client) == WS_STATE_OPEN) {
         send_frame(client, op, msg, msg_len);
       }
     }
@@ -764,7 +768,7 @@ void ws_send_bytes_broadcast (ws_client *cli, const char *msg, size_t msg_len, i
   pthread_mutex_unlock(&server->mtx);
 }
 void ws_send_all(ws_server *server, const char *msg) {
-  ws_send_bytes_all(server, msg, msg ? strlen(msg) : 0, TEXT);
+  ws_send_bytes_all(server, msg, msg ? strlen(msg) : 0, WS_FR_OP_TEXT);
 }
 void ws_send_bytes_all(ws_server *server, const char *msg, size_t msg_len, int op) {
   if (!server || !msg || msg_len == 0) return;
@@ -772,7 +776,7 @@ void ws_send_bytes_all(ws_server *server, const char *msg, size_t msg_len, int o
   pthread_mutex_lock(&server->mtx);
   ws_client *client = server->clients.head;
   while (client != NULL) {
-    if (__ws_get_client_state(client) == 1) {
+    if (__ws_get_client_state(client) == WS_STATE_OPEN) {
       send_frame(client, op, msg, msg_len);
     }
     client = client->next;
@@ -802,7 +806,7 @@ void ws_event_set_timeout(ws_server *srv, unsigned int timeout) {
 }
 void ws_send(ws_client *client, const char *msg) {
   if (!client || !msg || strlen(msg) == 0) return;
-  send_frame(client, TEXT, msg, strlen(msg));
+  send_frame(client, WS_FR_OP_TEXT, msg, strlen(msg));
 }
 void ws_send_bytes(ws_client *client, const char *msg, size_t len, int opcode) {
   send_frame(client, opcode, msg, len);

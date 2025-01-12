@@ -21,12 +21,12 @@ typedef struct frame {
 } ws_frame;
 
 enum opcode {
-  CONT = 0,
-  TEXT = 1,
-  BINARY = 2,
-  CLOSE = 8,
-  PING = 9,
-  PONG = 10,
+  WS_FR_OP_CONT = 0,
+  WS_FR_OP_TEXT = 1,
+  WS_FR_OP_BINARY = 2,
+  WS_FR_OP_CLOSE = 8,
+  WS_FR_OP_PING = 9,
+  WS_FR_OP_PONG = 10,
 };
 typedef struct _client ws_client;
 typedef struct _server ws_server;
