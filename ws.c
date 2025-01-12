@@ -131,10 +131,7 @@ static ssize_t ws_client_restrict_read(ws_client *cli, void *buf, size_t len) {
     if (cli->buf.pos == 0 || cli->buf.pos == cli->buf.len) {
       memset(cli->buf.data, 0, sizeof(cli->buf.data));
       n = recv(cli->fd, cli->buf.data, sizeof(cli->buf.data), 0);
-      if (n <= 0) {
-        if (n < 0 && (errno == EWOULDBLOCK || errno == EAGAIN)) continue;
-        return -1;
-      }
+      if (n <= 0) return -1;
       cli->buf.pos = 0;
       cli->buf.len = (size_t)n;
     }
@@ -458,6 +455,7 @@ static void *__ws_handle_client (void *_self)
   if (__ws_get_client_state(client) != 1) {
     int result = handle_verify (client);
     if (result) {
+      if((errno == EWOULDBLOCK || errno == EAGAIN)) return NULL;
       __ws_close_client(client);
       return NULL;
     }
@@ -470,6 +468,7 @@ static void *__ws_handle_client (void *_self)
   for (;;) {
     uint8_t data[10] = {0};
     if (ws_client_restrict_read(client, data, 2) < 2) {
+      if((errno == EWOULDBLOCK || errno == EAGAIN)) return NULL;
       __ws_close_client(client);
       goto clean_up;
     }
@@ -485,6 +484,7 @@ static void *__ws_handle_client (void *_self)
     if (pl_len == 126) {
       memset(data, 0, sizeof(data));
       if (ws_client_restrict_read(client, data, 2) < 2) {
+        if((errno == EWOULDBLOCK || errno == EAGAIN)) return NULL;
         pthread_mutex_lock(&client->server->mtx);
         close_client(client);
         pthread_mutex_unlock(&client->server->mtx);
@@ -494,6 +494,7 @@ static void *__ws_handle_client (void *_self)
     } else if (pl_len == 127) {
       memset(data, 0, sizeof(data));
       if (ws_client_restrict_read(client, data, 8) < 8) {
+        if((errno == EWOULDBLOCK || errno == EAGAIN)) return NULL;
         __ws_close_client(client);
         goto clean_up;
       }
@@ -502,6 +503,7 @@ static void *__ws_handle_client (void *_self)
     if (mask) {
       memset(data, 0, sizeof(data));
       if (ws_client_restrict_read(client, data, 4) < 4) {
+        if((errno == EWOULDBLOCK || errno == EAGAIN)) return NULL;
         __ws_close_client(client);
         goto clean_up;
       }
@@ -514,6 +516,7 @@ static void *__ws_handle_client (void *_self)
     }
     payload = tmp;
     if (ws_client_restrict_read(client, payload + recv_len, pl_len) <= 0) {
+      if((errno == EWOULDBLOCK || errno == EAGAIN)) return NULL;
       __ws_close_client(client);
       goto clean_up;
     }
@@ -537,6 +540,7 @@ static void *__ws_handle_client (void *_self)
     }
   }
   return NULL;
+
 clean_up:
   __ws_disponse(payload);
   return NULL;
@@ -579,6 +583,7 @@ static void * __ws_event_loop (void *data)
     }
   }
 
+  const uint32_t err_mask = EPOLLERR | EPOLLHUP;
   for (;;) {
     nfds = epoll_wait (server->epollfd, events, MAX_EVENTS, -1);
     if (nfds == -1) {
@@ -590,6 +595,7 @@ static void * __ws_event_loop (void *data)
     int n;
     for (n = 0; n < nfds; ++n) {
       if (events[n].data.fd == server->listen_sock) {
+        if (!(events[n].events & EPOLLIN)) continue;
         conn_sock = accept (server->listen_sock,
                             (struct sockaddr *) &servaddr, &addrlen);
         if (conn_sock == -1) {
@@ -628,23 +634,34 @@ static void * __ws_event_loop (void *data)
           __ws_close_socket(conn_sock);
         }
       } else if (events[n].data.fd == server->time_fd) {
-        unsigned long long val;
-        static int n_id;
-        if (read(events[n].data.fd, &val, sizeof(val)) > 0) {
-          printf("Received timerfd event via epoll: %d\n", n_id++);
-        }
-        if (server->events.onperodic) {
-          pthread_t periodic_thread;
-          if (pthread_create(&periodic_thread, NULL, __ws_call_periodic, server)) {
-            #ifndef NDEBUG
-            perror ("pthread_create");
-            #endif
-            exit(EXIT_FAILURE);
+        if (events[n].events & EPOLLIN) {
+          unsigned long long val;
+          static int n_id;
+          if (read(events[n].data.fd, &val, sizeof(val)) > 0) {
+            printf("Received timerfd event via epoll: %d\n", n_id++);
           }
-          pthread_detach(periodic_thread);
+          if (server->events.onperodic) {
+            pthread_t periodic_thread;
+            if (pthread_create(&periodic_thread, NULL, __ws_call_periodic, server)) {
+              #ifndef NDEBUG
+              perror ("pthread_create");
+              #endif
+              exit(EXIT_FAILURE);
+            }
+            pthread_detach(periodic_thread);
+          }
         }
       } else {
         ws_client *cli = __ws_get_client(server, events[n].data.fd);
+        if (events[n].events & err_mask) {
+          if (cli) {
+            __ws_close_client(cli);
+          } else {
+            __ws_close_socket(events[n].data.fd);
+          }
+          continue;
+        }
+        if (!(events[n].events & EPOLLIN)) continue;
         if (cli != NULL) {
           pthread_t client_thread;
           if (pthread_create(
