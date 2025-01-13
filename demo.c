@@ -1,3 +1,5 @@
+#define _GNU_SOURCE
+
 #include <stdio.h>
 #include "ws.h"
 
@@ -26,7 +28,7 @@ int main() {
   cli->events.onclose = onclose;
   cli->events.onmessage = ondata;
 
-  ws_client_connect(cli, "ws://127.0.0.1:9876", NULL);
+  ws_client_connect(cli, "ws://jerq-aggregator-prod.aws.barchart.com/socket.io/?EIO=3&transport=websocket", NULL);
 
   ws_event_listen(cli, 0);
   ws_event_dispose(cli);

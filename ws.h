@@ -1,6 +1,10 @@
 #ifndef _WS_H
 #define _WS_H
 
+#ifndef _GNU_SOURCE
+  #define _GNU_SOURCE
+#endif
+
 #include <stdint.h>
 #include <pthread.h>
 
@@ -32,13 +36,6 @@ struct ws_event_list {
   void (*onperodic)(ws_client *);
 };
 
-struct url_t {
-  char host[512];
-  int port;
-  char path[512];
-  const char *origin;
-};
-
 struct _client {
   int epollfd;
   int time_fd;
@@ -53,7 +50,7 @@ struct _client {
   size_t id;
   void *data;
   int is_stop;
-  struct url_t url;
+  unsigned char nonce[16];
 };
 
 void ws_send(ws_client *client, const char *msg);
